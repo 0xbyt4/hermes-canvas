@@ -563,10 +563,11 @@ function BoxLabel({ box, w, top, size, max }) {
   })
 }
 
-// Hermes names subagents `sa-<index>-<hex>`; show them as "subagent 1", "subagent 2"…
+// Hermes names subagents `sa-<index>-<hex>`. The index restarts at 0 for each delegate_task call,
+// so it repeats. The hex suffix is unique: show its first four characters.
 function ownerName(owner) {
-  const m = /^sa-(\d+)-/.exec(owner || '')
-  return m ? `subagent ${Number(m[1]) + 1}` : owner
+  const m = /^sa-\d+-([0-9a-f]{4})/.exec(owner || '')
+  return m ? `subagent ${m[1]}` : owner
 }
 
 function clip(text, max) {
