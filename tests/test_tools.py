@@ -139,3 +139,16 @@ def test_subagent_canvas_get_leaves_edits_for_the_main_agent(
     assert sub["user_edits"] == ["use cents"]
     assert call(tools.canvas_get, {})["user_edits"] == ["use cents"]
     assert call(tools.canvas_get, {})["user_edits"] == []
+
+
+def test_draw_and_get_give_the_note_tag_used_in_tool_results(tools: CanvasTools) -> None:
+    out = draw(tools)
+    tag = f"[hermes-canvas {tools.runtime.note_key(out['canvas_id'])}]"
+    assert out["note_tag"] == tag
+    assert call(tools.canvas_get, {})["note_tag"] == tag
+    hooks = CanvasHooks(tools.runtime)
+    tools.store.add_edit(out["canvas_id"], "remove", "Removed box 'ui'.", "ui")
+    result = hooks.transform_tool_result(
+        tool_name="terminal", args={"command": "ls"}, result='{"output": ""}', task_id=SID, session_id=SID
+    )
+    assert result is not None and result.startswith(tag)

@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .binding import goal_tag, normalize_globs
-from .hooks import box_summary
+from .hooks import box_summary, note_tag
 from .model import OP_NAMES, Box, CanvasError, Doc, apply_op, ready_boxes
 from .runtime import CanvasRuntime
 
@@ -148,6 +148,8 @@ class CanvasTools:
                 "canvas_id": doc.id,
                 "revision": doc.revision,
                 "card": card(doc.id),
+                # The turn-start context has no key yet in the turn that draws the canvas.
+                "note_tag": note_tag(self.runtime.note_key(doc.id)),
                 "boxes": [box_summary(b) for b in doc.active_boxes()],
                 "ready": [b.id for b in ready_boxes(doc)],
             }
@@ -190,6 +192,7 @@ class CanvasTools:
                 "title": doc.title,
                 "root": doc.root,
                 "revision": doc.revision,
+                "note_tag": note_tag(self.runtime.note_key(doc.id)),
                 "boxes": [_box_view(b) for b in doc.boxes],
                 "user_edits": [e.text for e in edits],
             }
