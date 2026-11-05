@@ -383,7 +383,7 @@ class CanvasHooks:
             owner = self.runtime.owner_box(task_id, session_id)
             box = doc.box(owner[1]) if owner else None
             if link is not None and box is not None:
-                self.runtime.see_note(link, box.note)
+                self.runtime.see_note(link, box.note, doc.revision)
             text = subagent_context(doc, box) if box is not None else plan_context(doc)
             return {"context": f"{text}\n{note_key_context(self.runtime.note_key(doc.id))}"}
         edits = self.store.take_pending_edits(doc.id)

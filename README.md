@@ -15,7 +15,7 @@ exits. You steer the build by editing the canvas, before and during the build.
 | Watch the plan | Boxes change status from real file writes and check exit codes. |
 | Answer a question box | Click an option on the canvas or on the chat card. The answer starts the next turn. |
 | Remove a box mid-build | The next write to that box's files is blocked, from the write tools and from the terminal. |
-| Add a box or leave a note | The agent gets your edit at the start of its next tool result, or of its next turn. |
+| Add a box or leave a note | The agent gets your edit at the start of its next tool result, or of its next turn. A note on a box also reaches the subagent that builds it. |
 | See drift | A write outside every box shows as a drift box. Click "Add to plan" to keep it. |
 | Inspect a box | See its files, its check output and the diff of the files it wrote. |
 | Replay | Step through every revision of the plan with the History bar. |

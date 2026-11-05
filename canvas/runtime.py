@@ -32,9 +32,17 @@ class SubagentLink:
     note_seen: str | None = None
     # True when the last note change this subagent got was the user clearing the note.
     cleared_seen: bool = False
+    # The document revision of `note_seen`, so an older read never replaces a newer one.
+    note_revision: int = 0
 
 
 class CanvasRuntime:
+    """Per-process state: bindings, note keys and subagent links.
+
+    Never call the store while holding `self._lock`. The store calls `_on_change` under its own
+    lock, and that takes `self._lock`: the opposite order deadlocks.
+    """
+
     def __init__(self, store: CanvasStore) -> None:
         self.store = store
         self._lock = threading.RLock()
@@ -167,31 +175,41 @@ class CanvasRuntime:
                 self._child_sessions[child_session_id] = subagent_id
         return link
 
-    def see_note(self, link: SubagentLink, note: str) -> None:
+    def see_note(self, link: SubagentLink, note: str, revision: int) -> None:
         """Record the box note a subagent got in its context when it started."""
         with self._lock:
-            link.note_seen = note
-            link.cleared_seen = False
+            if revision >= link.note_revision:
+                link.note_seen = note
+                link.cleared_seen = False
+                link.note_revision = revision
 
     def new_box_note(self, link: SubagentLink) -> Box | None:
         """The subagent's box, if the user changed its note since the subagent last saw it.
 
-        Reading the box and recording the note happen under one lock, so two parallel tool
-        results of one subagent cannot deliver an older note after a newer one.
+        The store is read outside `self._lock`: the store calls `_on_change` while it holds its
+        own lock, so waiting for the store while holding ours can deadlock. The revision number
+        keeps two parallel tool results of one subagent from delivering an older note last.
         """
+        if not (link.doc_id and link.box_id):
+            return None
+        doc = self.store.get(link.doc_id)
+        box = doc.box(link.box_id) if doc else None
+        if doc is None or box is None:
+            return None
+        user_clear = False
+        if not box.note:
+            # A note can also vanish when the agent redraws the plan without the box and then
+            # with it again. Only the user's own clear is news for the subagent.
+            last = self.store.latest_edit(doc.id, box.id, "note")
+            user_clear = last is not None and last.text.startswith(NOTE_CLEARED_PREFIX)
         with self._lock:
-            doc = self.store.get(link.doc_id) if link.doc_id and link.box_id else None
-            box = doc.box(link.box_id) if doc else None
-            if box is None or box.note == (link.note_seen or ""):
+            if doc.revision < link.note_revision or box.note == (link.note_seen or ""):
                 return None
-            if not box.note:
-                # A note can also vanish when the agent redraws the plan without the box and
-                # then with it again. Only the user's own clear is news for the subagent.
-                last = self.store.latest_edit(doc.id, box.id, "note")
-                if last is None or not last.text.startswith(NOTE_CLEARED_PREFIX):
-                    return None
+            if not box.note and not user_clear:
+                return None
             link.note_seen = box.note
             link.cleared_seen = not box.note
+            link.note_revision = doc.revision
             return box
 
     def note_reached_subagent(self, doc_id: str, box_id: str, note: str) -> bool:

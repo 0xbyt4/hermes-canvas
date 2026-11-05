@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -649,3 +650,24 @@ def test_a_redraw_that_drops_a_note_is_not_reported_as_the_users_clear(
     hooks.store.draw(SID, "Shop", ROOT, plan(*SHOP_PLAN))
     assert hooks.store.get(doc_id).require("api").note == ""
     assert _sub_result(hooks) is None
+
+
+def test_a_note_check_and_a_store_change_at_once_do_not_deadlock(hooks: CanvasHooks, doc_id: str) -> None:
+    start_api_subagent(hooks, doc_id)
+    link = hooks.runtime.link_for("sa-0-aaaa1111", "c1")
+    assert link is not None
+    store_locked = threading.Event()
+
+    def slow_mutate(doc: Doc) -> str:
+        store_locked.set()
+        time.sleep(0.3)  # hold the store lock while the other thread checks the note
+        return apply_op(doc, {"op": "note", "id": "api", "text": "Use cents everywhere"})
+
+    writer = threading.Thread(target=lambda: hooks.store.update(doc_id, slow_mutate, "user"), daemon=True)
+    reader = threading.Thread(target=lambda: hooks.runtime.new_box_note(link), daemon=True)
+    writer.start()
+    assert store_locked.wait(2)
+    reader.start()
+    writer.join(5)
+    reader.join(5)
+    assert not writer.is_alive() and not reader.is_alive()
