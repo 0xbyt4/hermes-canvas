@@ -37,6 +37,8 @@ separately. Skip it for one-file fixes and questions.
    or call `delegate_task` with the returned `goal` unchanged. The `[canvas:...]` tag at the start of
    the goal links the subagent to its box.
 5. After each box, run its exact `check` command with the terminal tool. Fix failures until it passes.
+   Run the command as written. A leading `cd <root> &&` is fine. Do not add `; echo`, pipes,
+   `|| true` or extra arguments: the canvas only counts the exact command.
 6. Before you finish, call `canvas_get` and make sure no box is failed and every box has writes.
 
 ## Example
