@@ -15,3 +15,5 @@ provides_hooks:
   - subagent_start
   - subagent_stop
   - pre_llm_call
+  - transform_tool_result
+  - pre_verify

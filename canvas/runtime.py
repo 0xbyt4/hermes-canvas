@@ -9,6 +9,7 @@ mapped back to the root session that owns the canvas through `subagent_start`.
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 from dataclasses import dataclass
 
@@ -37,6 +38,7 @@ class CanvasRuntime:
         self._session_docs: dict[str, str] = {}
         self._subagents: dict[str, SubagentLink] = {}
         self._child_sessions: dict[str, str] = {}
+        self._note_keys: dict[str, str] = {}
         store.on_change(self._on_change)
 
     def _on_change(self, doc: Doc, author: str, reason: str) -> None:
@@ -53,6 +55,18 @@ class CanvasRuntime:
                 return cached
             self._bindings[doc.id] = built
             return built
+
+    def note_key(self, doc_id: str) -> str:
+        """A random tag for this canvas's notes inside tool results.
+
+        The tag is announced only in `pre_llm_call` context (the user's channel). A file, page or
+        command output that imitates a canvas note cannot know it.
+        """
+        with self._lock:
+            key = self._note_keys.get(doc_id)
+            if key is None:
+                key = self._note_keys[doc_id] = secrets.token_hex(4)
+            return key
 
     # -- identity --------------------------------------------------------------------------
 

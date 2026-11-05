@@ -17,6 +17,7 @@ from .model import Box, CanvasError, Doc
 WRITE_TOOLS = ("write_file", "patch")
 GOAL_TAG_RE = re.compile(r"\[canvas:(cv-[0-9a-f]{10})/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})\]")
 _V4A_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$|^\*\*\* Move to: (.+?)\s*$", re.M)
+_STDERR_REDIRECT_RE = re.compile(r"^2>\s*(?:&1|\S+)\s*")
 _CD_PREFIX_RE = re.compile(r"^\s*cd\s+(?:\"[^\"]*\"|'[^']*'|\S+)\s*(?:&&|;)\s*")
 _STDERR_SUFFIX_RE = re.compile(r"\s+2>&1\s*$")
 _WILDCARDS = set("*?")
@@ -225,3 +226,22 @@ class Binding:
         if not normalized:
             return []
         return [box_id for box_id, check in self.checks if check == normalized]
+
+    def near_checks(self, command: str) -> list[tuple[str, str]]:
+        """(box id, check) for checks this command starts with but does not equal.
+
+        `<check>; echo "exit=$?"`, `<check> | tail` or `<check> || true` run the check, but the
+        exit code the canvas sees is not the check's, so they are not counted. The agent is told
+        to run the exact command instead.
+        """
+        # A newline separates commands like `;` does; normalizing would turn it into a space.
+        normalized = normalize_command(command.replace("\n", " ; "))
+        found = []
+        for box_id, check in self.checks:
+            if normalized == check or not normalized.startswith(check):
+                continue
+            # Only shell operators after the check: extra arguments make it another command.
+            rest = _STDERR_REDIRECT_RE.sub("", normalized[len(check) :].lstrip())
+            if not rest or rest[:1] in (";", "|", "&", ">"):  # empty: only a redirect was added
+                found.append((box_id, check))
+        return found

@@ -69,6 +69,8 @@ def register(ctx: Any) -> None:
     ctx.register_hook("subagent_start", hooks.subagent_start)
     ctx.register_hook("subagent_stop", hooks.subagent_stop)
     ctx.register_hook("pre_llm_call", hooks.pre_llm_call)
+    ctx.register_hook("transform_tool_result", hooks.transform_tool_result)
+    ctx.register_hook("pre_verify", hooks.pre_verify)
     ctx.register_skill(
         "hermes-canvas",
         SKILL_PATH,

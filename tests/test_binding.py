@@ -138,6 +138,21 @@ def test_binding_checks_match_the_exact_command_only() -> None:
     assert binding.boxes_for_command("ls -la") == []
 
 
+def test_check_runs_with_extra_shell_parts_are_near_misses() -> None:
+    binding = make_binding()
+    api = [("api", "npm test -- api")]
+    assert binding.near_checks('npm test -- api; echo "exit=$?"') == api
+    assert binding.near_checks("cd /repo && npm test -- api | tail -5") == api
+    assert binding.near_checks("npm test -- api || true") == api
+    assert binding.near_checks("npm test -- api 2>&1 | tail") == api
+    assert binding.near_checks("npm test -- api 2>/dev/null") == api
+    assert binding.near_checks("npm test -- api\necho done") == api
+    assert binding.near_checks("npm test -- api") == []  # exact: counted, not a near miss
+    assert binding.near_checks("npm test -- api -t refunds") == []  # another command
+    assert binding.near_checks("echo 'npm test -- api'") == []
+    assert binding.near_checks("ls -la") == []
+
+
 def test_binding_returns_every_box_that_shares_a_check() -> None:
     doc = Doc(
         id="cv-1",

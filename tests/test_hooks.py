@@ -6,51 +6,12 @@ import time
 from pathlib import Path
 
 import pytest
-from helpers import SHOP_PLAN, plan
+from helpers import ROOT, SHOP_PLAN, SID, plan, start_api_subagent, terminal, write
 
 from canvas.hooks import BLOCK_PREFIX, CanvasHooks
 from canvas.model import Doc, apply_op
 from canvas.runtime import CanvasRuntime
 from canvas.store import CanvasStore
-
-ROOT = "/repo"
-SID = "local-abc"
-
-
-@pytest.fixture
-def hooks(store: CanvasStore) -> CanvasHooks:
-    return CanvasHooks(CanvasRuntime(store))
-
-
-@pytest.fixture
-def doc_id(hooks: CanvasHooks) -> str:
-    doc = hooks.store.draw(SID, "Shop", ROOT, plan(*SHOP_PLAN))
-    return doc.id
-
-
-def write(
-    hooks: CanvasHooks, path: str, *, task_id: str = SID, session_id: str = SID, status: str = "ok"
-) -> None:
-    hooks.post_tool_call(
-        tool_name="write_file",
-        args={"path": path, "content": "x"},
-        result=json.dumps({"bytes_written": 1}),
-        task_id=task_id,
-        session_id=session_id,
-        status=status,
-    )
-
-
-def terminal(hooks: CanvasHooks, command: str, exit_code: int, output: str = "", **extra: object) -> None:
-    # Like Hermes: any non-zero exit is reported to post_tool_call as status "error".
-    hooks.post_tool_call(
-        tool_name="terminal",
-        args={"command": command},
-        result=json.dumps({"output": output, "exit_code": exit_code, "error": None, **extra}),
-        task_id=SID,
-        session_id=SID,
-        status="ok" if exit_code == 0 else "error",
-    )
 
 
 def test_write_marks_box_doing_and_counts(hooks: CanvasHooks, doc_id: str) -> None:
@@ -326,15 +287,6 @@ def test_removed_drift_box_does_not_block(hooks: CanvasHooks, doc_id: str) -> No
     hooks.store.update(doc_id, lambda d: apply_op(d, {"op": "remove", "id": "drift-1"}), "user")
     args = {"path": "src/money.ts"}
     assert hooks.pre_tool_call(tool_name="write_file", args=args, task_id=SID, session_id=SID) is None
-
-
-def start_api_subagent(hooks: CanvasHooks, doc_id: str) -> None:
-    hooks.subagent_start(
-        parent_session_id=SID,
-        child_session_id="c1",
-        child_subagent_id="sa-0-aaaa1111",
-        child_goal=f"[canvas:{doc_id}/api] Payment API.",
-    )
 
 
 def test_subagent_stop_before_check_puts_the_box_back(hooks: CanvasHooks, doc_id: str) -> None:
