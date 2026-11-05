@@ -64,7 +64,7 @@ ChangeListener = Callable[[Doc, str, str], None]
 
 @dataclass(frozen=True)
 class Edit:
-    """A user change on the canvas that the agent has not seen yet."""
+    """A user change on the canvas, and when the agent got it (None while it waits)."""
 
     id: int
     doc_id: str
@@ -72,6 +72,7 @@ class Edit:
     text: str
     box_id: str
     created_at: float
+    delivered_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -217,6 +218,16 @@ class CanvasStore:
                 (doc_id,),
             ).fetchall()
         return [Edit(*row) for row in rows]
+
+    def recent_edits(self, doc_id: str, limit: int) -> list[Edit]:
+        """The newest `limit` edits, delivered or not, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, doc_id, kind, text, box_id, created_at, delivered_at FROM edits "
+                "WHERE doc_id = ? ORDER BY id DESC LIMIT ?",
+                (doc_id, limit),
+            ).fetchall()
+        return [Edit(*row) for row in reversed(rows)]
 
     def latest_edit(self, doc_id: str, box_id: str, kind: str) -> Edit | None:
         """The newest edit of `kind` on a box, delivered or not."""

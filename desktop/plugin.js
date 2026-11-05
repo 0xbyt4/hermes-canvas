@@ -478,6 +478,15 @@ const STYLE = `
 .hc-dep { display: inline-flex; align-items: center; gap: 4px; margin: 2px 6px 2px 0; padding: 1px 4px 1px 8px; border: 1px solid var(--hc-line); border-radius: 999px; font-size: 11px; }
 .hc-dep button { font: inherit; border: 0; background: transparent; color: var(--hc-muted); cursor: pointer; padding: 0 3px; line-height: 1; }
 .hc-dep button:hover:not(:disabled) { color: var(--hc-fail); }
+.hc-edits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.hc-edits li { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; min-width: 0; }
+.hc-edit-mark { width: 12px; flex: none; text-align: center; font-weight: 700; }
+.hc-edits li.got .hc-edit-mark { color: var(--hc-done); }
+.hc-edits li.wait .hc-edit-mark { color: color-mix(in srgb, var(--hc-note) 70%, var(--hc-ink)); }
+.hc-edit-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hc-edit-state { color: var(--hc-muted); font-size: 10.5px; flex: none; }
+.hc-edits-panel { border-top: 1px solid var(--hc-line); padding: 6px 10px; max-height: 32%; overflow: auto; display: flex; flex-direction: column; gap: 4px; }
+.hc-textbtn { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
 .hc-history { border-top: 1px solid var(--hc-line); padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
 .hc-range { flex: 1; min-width: 80px; accent-color: var(--hc-accent); }
 .hc-past { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); font-size: 11px; padding: 2px 10px; border-radius: 999px; background: var(--hc-accent); color: var(--hc-paper); pointer-events: none; }
@@ -1401,6 +1410,7 @@ function CanvasPane() {
   const [hist, setHist] = useState(null) // { list, n, doc, playing } while viewing past revisions
   const [finale, setFinale] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [showEdits, setShowEdits] = useState(false)
   // The drag lives in a ref: pointer events can arrive before React re-renders, so handlers must
   // not read it from a render's closure. The state copy only redraws the dragged box.
   const dragRef = useRef(null) // { id, dx, dy, startX, startY, moved }
@@ -1469,6 +1479,7 @@ function CanvasPane() {
     setFinale(false)
     setBorn({})
     setSaid({})
+    setShowEdits(false)
     firstRef.current = true
     revSeq.current++
     setLoaded(false)
@@ -1623,6 +1634,8 @@ function CanvasPane() {
       later(() => setFinale(false), FINALE_MS)
     }
   }, [shown])
+
+  const edits = useEdits(doc ? doc.id : '', `${doc ? doc.revision : 0}|${pending}`, 8)
 
   // History: scrub or play the saved revisions. The live canvas keeps updating underneath.
   // Only the newest request may change the replay: a slow older response must not land last.
@@ -2051,6 +2064,12 @@ function CanvasPane() {
             onNote: note
           })
         : null,
+      showEdits && edits.length
+        ? jsxs('div', {
+            className: 'hc-edits-panel',
+            children: [jsx('div', { className: 'hc-k', children: 'Your edits · hover to see what the agent reads' }), jsx(EditList, { edits })]
+          })
+        : null,
       jsxs('div', {
         className: 'hc-foot',
         children: [
@@ -2060,13 +2079,78 @@ function CanvasPane() {
               ? 'Drag from a box to a box that must wait for it. Esc to stop.'
               : 'Box status comes from hooks, not from the model.'
           }),
-          pending
-            ? jsx('span', { children: `${pending} edit${pending === 1 ? '' : 's'} waiting for the agent` })
+          edits.length
+            ? jsx('button', {
+                type: 'button',
+                className: 'hc-textbtn',
+                'aria-expanded': showEdits,
+                title: 'Show your edits and whether the agent got them',
+                onClick: () => setShowEdits(!showEdits),
+                children: pending ? `${pending} edit${pending === 1 ? '' : 's'} waiting for the agent` : 'Your edits'
+              })
             : null,
           error ? jsx('span', { className: 'hc-error', children: error }) : null
         ]
       })
     ]
+  })
+}
+
+/* ---------- the user's edits, and whether the agent got them ---------- */
+
+function firstSentence(text) {
+  const t = String(text || '')
+  const i = t.indexOf('. ')
+  return i > 0 ? t.slice(0, i + 1) : t
+}
+
+// The latest edits of a canvas. It loads again when `key` changes (a new revision or pending
+// count), and on the poll tick while an edit still waits for the agent: delivery saves no revision.
+function useEdits(canvasId, key, limit) {
+  const [edits, setEdits] = useState([])
+  const seq = useRef(0)
+  const load = useCallback(async () => {
+    if (!canvasId) return
+    const n = ++seq.current
+    try {
+      const res = await rest(`/edits?id=${encodeURIComponent(canvasId)}&limit=${limit}`)
+      if (n === seq.current) setEdits(res.edits || [])
+    } catch (err) {
+      console.warn('[hermes-canvas] could not load the edits', err)
+    }
+  }, [canvasId, limit])
+  useEffect(() => {
+    setEdits([])
+  }, [canvasId])
+  useEffect(() => {
+    load()
+  }, [load, key])
+  const waiting = edits.some(e => !e.delivered_at)
+  useCanvasEvents(event => {
+    if (!event && waiting) load()
+  })
+  return edits
+}
+
+function EditList({ edits }) {
+  if (!edits.length) return null
+  return jsx('ul', {
+    className: 'hc-edits',
+    children: edits.map(e =>
+      jsxs(
+        'li',
+        {
+          className: e.delivered_at ? 'got' : 'wait',
+          title: `The agent reads: ${e.text}`,
+          children: [
+            jsx('span', { className: 'hc-edit-mark', 'aria-hidden': true, children: e.delivered_at ? '✓' : '…' }),
+            jsx('span', { className: 'hc-edit-text', children: firstSentence(e.text) }),
+            jsx('span', { className: 'hc-edit-state', children: e.delivered_at ? 'delivered' : 'waiting' })
+          ]
+        },
+        e.id
+      )
+    )
   })
 }
 
@@ -2078,6 +2162,7 @@ function CanvasCard({ attrs, sessionId }) {
   const [doc, setDoc] = useState(null)
   const [error, setError] = useState('')
   const [sending, setSending] = useState(false)
+  const edits = useEdits(valid ? id : '', doc ? doc.revision : 0, 3)
   const load = useCallback(async () => {
     if (!valid) return
     try {
@@ -2155,6 +2240,8 @@ function CanvasCard({ attrs, sessionId }) {
           q.id
         )
       ),
+      edits.length ? jsx('div', { className: 'hc-k', children: 'Your edits' }) : null,
+      jsx(EditList, { edits }),
       error ? jsx('span', { className: 'hc-error', children: error }) : null,
       jsxs('div', {
         className: 'hc-row',

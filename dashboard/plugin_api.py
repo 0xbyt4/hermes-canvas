@@ -110,6 +110,11 @@ def post_edit(body: dict[str, Any]) -> dict[str, Any]:  # a dict parameter is th
     return _call(api.edit, canvas_id, body.get("ops"))
 
 
+@router.get("/edits")
+def get_edits(id: str = Query(..., max_length=64), limit: int = Query(8, ge=1, le=20)) -> dict[str, Any]:
+    return _call(_canvas_api().edits, id, limit)
+
+
 @router.get("/history")
 def get_history(id: str = Query(..., max_length=64)) -> dict[str, Any]:
     return _call(_canvas_api().history, id)

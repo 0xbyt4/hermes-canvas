@@ -35,6 +35,7 @@ USER_OPS = (
 )
 USER_ADD_KEYS = ("id", "label", "after")
 MAX_OPS = 20
+MAX_RECENT_EDITS = 20
 EVENT_CHANGED = "changed"
 
 Emit = Callable[[str, dict[str, Any]], None]
@@ -92,6 +93,27 @@ class CanvasApi:
         if current is None:
             raise CanvasError(f"no canvas with id {canvas_id!r}")
         return {"canvas": doc_view(current), "pending_edits": len(self.store.pending_edits(canvas_id))}
+
+    def edits(self, canvas_id: str, limit: int = 8) -> dict[str, Any]:
+        """The user's latest edits with the exact text the agent reads, and whether it got them."""
+        if self.store.get(canvas_id) is None:
+            raise CanvasError(f"no canvas with id {canvas_id!r}")
+        recent = self.store.recent_edits(canvas_id, max(1, min(limit, MAX_RECENT_EDITS)))
+        return {
+            "canvas_id": canvas_id,
+            "edits": [
+                {
+                    "id": e.id,
+                    "kind": e.kind,
+                    "box_id": e.box_id,
+                    "text": e.text,
+                    "at": e.created_at,
+                    "delivered_at": e.delivered_at,
+                }
+                for e in recent
+            ],
+            "pending_edits": len(self.store.pending_edits(canvas_id)),
+        }
 
     def history(self, canvas_id: str) -> dict[str, Any]:
         if self.store.get(canvas_id) is None:

@@ -406,3 +406,22 @@ def test_a_revert_request_survives_a_redraw(api: CanvasApi, doc_id: str) -> None
     doc = api.store.get(doc_id)
     api.store.draw(SID, "Shop", "/repo", [Box.from_dict(b.to_dict()) for b in doc.boxes])
     assert api.store.get(doc_id).require("drift-1").revert_asked is True
+
+
+def test_recent_edits_show_what_the_agent_reads_and_when_it_got_them(api: CanvasApi, doc_id: str) -> None:
+    api.edit(doc_id, [{"op": "remove", "id": "refund"}])
+    api.edit(doc_id, [{"op": "note", "id": "ui", "text": "Dark mode first"}])
+    out = api.edits(doc_id)
+    assert out["pending_edits"] == 2
+    assert [(e["kind"], e["box_id"], e["delivered_at"]) for e in out["edits"]] == [
+        ("remove", "refund", None),
+        ("note", "ui", None),
+    ]
+    assert out["edits"][0]["text"].startswith("Removed box 'refund' (Refund page) from the plan.")
+    api.store.take_pending_edits(doc_id)
+    out = api.edits(doc_id, limit=1)
+    assert out["pending_edits"] == 0
+    assert [e["kind"] for e in out["edits"]] == ["note"]
+    assert out["edits"][0]["delivered_at"] is not None
+    with pytest.raises(CanvasError, match="no canvas"):
+        api.edits("cv-0000000000")
