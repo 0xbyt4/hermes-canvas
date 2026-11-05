@@ -301,6 +301,7 @@ def _carry_state(prev: Box, box: Box) -> None:
     box.check_output = prev.check_output
     box.answer = prev.answer
     box.note = prev.note
+    box.revert_asked = prev.revert_asked
     box.removed = prev.removed
     box.x, box.y = prev.x, prev.y  # only the user's `move` sets a position
 

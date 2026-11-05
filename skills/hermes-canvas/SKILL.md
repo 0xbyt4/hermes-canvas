@@ -64,8 +64,12 @@ separately. Skip it for one-file fixes and questions.
 ## User edits
 
 The user can add, remove, restore, rename or move boxes, leave a note on a box, answer questions,
-and add drift files to the plan, on the canvas. A box the user adds has a name only: give it `files`
-and a `check` with `canvas_update` before you build it. You get these edits in a `[hermes-canvas]` block:
+make a box wait for another box or drop such a dependency, add drift files to the plan, and ask you
+to undo a drift change, on the canvas. A box the user adds has a name only: give it `files` and a
+`check` with `canvas_update` before you build it. When the user asks you to undo a drift change, undo
+only your own change: the user may have uncommitted work in that file. Use `git checkout -- <file>`
+only when `git diff` shows nothing but your change, delete a file you created, and otherwise undo
+your edit by hand or ask. Then remove that drift box with `canvas_update`. You get these edits in a `[hermes-canvas]` block:
 
 - at the start of a turn, in your context;
 - while you work, at the start of your next tool result;

@@ -471,6 +471,13 @@ const STYLE = `
 .hc-bubble text { font-family: var(--hc-hand); font-size: 12.5px; fill: var(--hc-ink); }
 .hc-ripple { fill: none; stroke-width: 2; transform-box: fill-box; transform-origin: center; animation: hc-ripple .8s ease-out forwards; }
 .hc-gate { position: absolute; left: 50%; transform: translateX(-50%); max-width: calc(100% - 24px); box-sizing: border-box; font-size: 11.5px; font-weight: 600; padding: 4px 12px; border-radius: 999px; color: var(--hc-fail); background: color-mix(in srgb, var(--hc-fail) 12%, var(--hc-paper)); border: 1px solid var(--hc-fail); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; animation: hc-fadein .3s ease-out both; }
+.hc-link-line { fill: none; stroke: var(--hc-accent); stroke-width: 2; stroke-dasharray: 6 5; pointer-events: none; }
+.hc-link-head { fill: var(--hc-accent); pointer-events: none; }
+.hc-link-target { fill: none; stroke: var(--hc-accent); stroke-width: 2.2; pointer-events: none; }
+.hc-linking .hc-el { cursor: crosshair; }
+.hc-dep { display: inline-flex; align-items: center; gap: 4px; margin: 2px 6px 2px 0; padding: 1px 4px 1px 8px; border: 1px solid var(--hc-line); border-radius: 999px; font-size: 11px; }
+.hc-dep button { font: inherit; border: 0; background: transparent; color: var(--hc-muted); cursor: pointer; padding: 0 3px; line-height: 1; }
+.hc-dep button:hover:not(:disabled) { color: var(--hc-fail); }
 .hc-history { border-top: 1px solid var(--hc-line); padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
 .hc-range { flex: 1; min-width: 80px; accent-color: var(--hc-accent); }
 .hc-past { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); font-size: 11px; padding: 2px 10px; border-radius: 999px; background: var(--hc-accent); color: var(--hc-paper); pointer-events: none; }
@@ -661,7 +668,9 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
       )
     })
   } else if (box.kind === 'drift') {
-    children.push(jsx('text', { x: 12, y: 24, fontSize: 14, className: 'hc-err', children: 'drift' }, 'tag'))
+    children.push(
+      jsx('text', { x: 12, y: 24, fontSize: 14, className: 'hc-err', children: box.revert_asked ? 'drift · undo asked' : 'drift' }, 'tag')
+    )
     children.push(
       jsx('text', { x: 12, y: 44, className: 'hc-sub', children: clipStart(box.files[0] || box.label, 34) }, 'path')
     )
@@ -703,6 +712,28 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
     'data-box': box.id,
     // A CSS transform on this group would replace its translate, so the pop runs on an inner group.
     children: jsx('g', { className: popped ? 'hc-pop' : undefined, children }, popped || 'still')
+  })
+}
+
+// The arrow the user is drawing in link mode. It snaps to the target box when over one.
+function LinkDraft({ from, to, x, y }) {
+  if (!from) return null
+  const end = to ? edgePoint(to, from) : { x, y }
+  const start = edgePoint(from, to || { x: x - 0.5, y: y - 0.5, w: 1, h: 1 })
+  const ang = Math.atan2(end.y - start.y, end.x - start.x)
+  const head = [
+    [end.x, end.y],
+    [end.x - 11 * Math.cos(ang - 0.4), end.y - 11 * Math.sin(ang - 0.4)],
+    [end.x - 11 * Math.cos(ang + 0.4), end.y - 11 * Math.sin(ang + 0.4)]
+  ]
+    .map(p => p.map(f1).join(','))
+    .join(' ')
+  return jsxs('g', {
+    children: [
+      to ? jsx('rect', { className: 'hc-link-target', x: to.x - 5, y: to.y - 5, width: to.w + 10, height: to.h + 10, rx: 8 }) : null,
+      jsx('path', { className: 'hc-link-line', d: `M${f1(start.x)} ${f1(start.y)} L${f1(end.x)} ${f1(end.y)}` }),
+      jsx('polygon', { className: 'hc-link-head', points: head })
+    ]
   })
 }
 
@@ -1001,7 +1032,22 @@ function NoteEditor({ box, busy, onSave }) {
   })
 }
 
-function Detail({ canvasId, box, renaming, busy, onRename, onCancelRename, onStartRename, onRemove, onRestore, onAdopt, onNote }) {
+function Detail({
+  canvasId,
+  box,
+  labels,
+  renaming,
+  busy,
+  onRename,
+  onCancelRename,
+  onStartRename,
+  onRemove,
+  onRestore,
+  onAdopt,
+  onRevert,
+  onUnlink,
+  onNote
+}) {
   const [draft, setDraft] = useState(box.label)
   const inputRef = useRef(null)
   // A poll can change the label while the user types: keep the draft until renaming ends.
@@ -1023,6 +1069,33 @@ function Detail({ canvasId, box, renaming, busy, onRename, onCancelRename, onSta
     rows.push(['Written', jsx('span', { className: 'hc-mono', children: box.written.slice(-6).join('  ') })])
   }
   if (box.blocked) rows.push(['Blocked writes', jsx('span', { children: String(box.blocked) })])
+  if (box.after && box.after.length) {
+    rows.push([
+      'Waits for',
+      jsx('div', {
+        children: box.after.map(dep =>
+          jsxs(
+            'span',
+            {
+              className: 'hc-dep',
+              children: [
+                labels.get(dep) || dep,
+                jsx('button', {
+                  type: 'button',
+                  disabled: busy,
+                  title: `Let this box start without ${labels.get(dep) || dep}`,
+                  'aria-label': `Remove the dependency on ${labels.get(dep) || dep}`,
+                  onClick: () => onUnlink(dep),
+                  children: '×'
+                })
+              ]
+            },
+            dep
+          )
+        )
+      })
+    ])
+  }
   if (box.kind === 'question') {
     rows.push(['Answer', jsx('span', { children: box.answer || 'not answered yet: pick an option on the box' })])
   }
@@ -1066,6 +1139,18 @@ function Detail({ canvasId, box, renaming, busy, onRename, onCancelRename, onSta
                 title: 'Keep this file as part of the plan',
                 children: 'Add to plan'
               })
+            : null,
+          box.kind === 'drift' && !box.removed
+            ? box.revert_asked
+              ? jsx('span', { className: 'hc-chip', title: 'The agent puts the file back, then removes this box', children: 'undo asked' })
+              : jsx('button', {
+                  type: 'button',
+                  className: 'hc-btn',
+                  disabled: busy,
+                  onClick: onRevert,
+                  title: 'Ask the agent to put this file back as it was',
+                  children: 'Revert'
+                })
             : null,
           box.removed
             ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onRestore, children: 'Restore' })
@@ -1319,6 +1404,14 @@ function CanvasPane() {
   // The drag lives in a ref: pointer events can arrive before React re-renders, so handlers must
   // not read it from a render's closure. The state copy only redraws the dragged box.
   const dragRef = useRef(null) // { id, dx, dy, startX, startY, moved }
+  // Link mode: drag from a box to the box that must wait for it.
+  const [linking, setLinking] = useState(false)
+  const linkRef = useRef(null) // { from, x, y, over }
+  const [link, setLinkState] = useState(null)
+  const setLink = l => {
+    linkRef.current = l
+    setLinkState(l)
+  }
   const [drag, setDragState] = useState(null)
   const setDrag = d => {
     dragRef.current = d
@@ -1591,10 +1684,26 @@ function CanvasPane() {
     return m ? pt.matrixTransform(m.inverse()) : { x: 0, y: 0 }
   }
 
+  // The box under a board point that can wait for others (link mode). The topmost box wins.
+  const boxAt = p => {
+    for (const box of [...shown.boxes].reverse()) {
+      if (box.kind !== 'component' || box.removed) continue
+      const r = posOf(box.id)
+      if (r && p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) return box
+    }
+    return null
+  }
+
   const onBoxPointerDown = (e, box) => {
     if (e.button !== 0 || past) return
     e.stopPropagation()
     const p = toBoard(e)
+    if (linking) {
+      if (busy || box.removed || (box.kind !== 'component' && box.kind !== 'question')) return
+      setLink({ from: box.id, x: p.x, y: p.y, over: null })
+      if (svgRef.current) svgRef.current.setPointerCapture(e.pointerId)
+      return
+    }
     // Select on release, not here: the detail strip resizes the board, which must not happen
     // under the pointer while a drag is in progress.
     setDrag({ id: box.id, dx: 0, dy: 0, startX: p.x, startY: p.y, moved: false })
@@ -1602,6 +1711,13 @@ function CanvasPane() {
   }
 
   const onPointerMove = e => {
+    const l = linkRef.current
+    if (l) {
+      const p = toBoard(e)
+      const over = boxAt(p)
+      setLink({ ...l, x: p.x, y: p.y, over: over && over.id !== l.from ? over.id : null })
+      return
+    }
     const d = dragRef.current
     if (!d) return
     const p = toBoard(e)
@@ -1611,6 +1727,13 @@ function CanvasPane() {
   }
 
   const onPointerUp = async () => {
+    const l = linkRef.current
+    if (l) {
+      setLink(null)
+      // The arrow points from the box that comes first to the box that waits for it.
+      if (l.over && (await send([{ op: 'link', id: l.over, after: l.from }]))) setLinking(false)
+      return
+    }
     const d = dragRef.current
     if (!d) return
     const p = placed.get(d.id)
@@ -1642,6 +1765,8 @@ function CanvasPane() {
     if (await send([{ op: 'rename', id: selBox.id, label: clean }])) setRenaming(false)
   }
   const adopt = () => selBox && send([{ op: 'adopt', id: selBox.id }])
+  const revert = () => selBox && send([{ op: 'revert', id: selBox.id }])
+  const unlink = dep => selBox && send([{ op: 'unlink', id: selBox.id, after: dep }])
   const note = text => (selBox ? send([{ op: 'note', id: selBox.id, text }]) : Promise.resolve(false))
   const addAfter = selBox && selBox.kind === 'component' && !selBox.removed ? selBox : null
   const addBox = async label => {
@@ -1659,6 +1784,11 @@ function CanvasPane() {
 
   const onKeyDown = e => {
     if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return
+    if (linking && e.key === 'Escape') {
+      setLink(null)
+      setLinking(false)
+      return
+    }
     if (!selBox || renaming || busy) return
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault()
@@ -1785,11 +1915,23 @@ function CanvasPane() {
               setRenaming(false)
             },
             children: '+ Box'
+          }),
+          jsx('button', {
+            type: 'button',
+            className: `hc-btn hc-follow${linking ? ' on' : ''}`,
+            'aria-pressed': linking,
+            disabled: busy || past,
+            title: 'Draw an arrow from a box to a box that must wait for it',
+            onClick: () => {
+              setLink(null)
+              setLinking(!linking)
+            },
+            children: '→ Link'
           })
         ]
       }),
       jsxs('div', {
-        className: 'hc-board',
+        className: `hc-board${linking ? ' hc-linking' : ''}`,
         ref: boardRef,
         // The camera holds still under the pointer, so a box never moves away from a click.
         onPointerEnter: () => {
@@ -1808,7 +1950,10 @@ function CanvasPane() {
             'aria-label': `Canvas: ${doc.title}`,
             onPointerMove,
             onPointerUp,
-            onPointerCancel: () => setDrag(null),
+            onPointerCancel: () => {
+              setDrag(null)
+              setLink(null)
+            },
             onPointerDown: () => {
               setSelected(null)
               setRenaming(false)
@@ -1850,7 +1995,8 @@ function CanvasPane() {
                   )
                 })
               }),
-              jsx('g', { children: markers })
+              jsx('g', { children: markers }),
+              link ? jsx(LinkDraft, { from: posOf(link.from), to: link.over ? posOf(link.over) : null, x: link.x, y: link.y }) : null
             ]
           }),
           past ? jsx('span', { className: 'hc-past', children: `Replay · revision ${shown.revision}` }) : null,
@@ -1899,13 +2045,21 @@ function CanvasPane() {
             onRemove: remove,
             onRestore: restore,
             onAdopt: adopt,
+            onRevert: revert,
+            onUnlink: unlink,
+            labels: new Map(doc.boxes.map(b => [b.id, b.label])),
             onNote: note
           })
         : null,
       jsxs('div', {
         className: 'hc-foot',
         children: [
-          jsx('span', { className: 'hc-src', children: 'Box status comes from hooks, not from the model.' }),
+          jsx('span', {
+            className: 'hc-src',
+            children: linking
+              ? 'Drag from a box to a box that must wait for it. Esc to stop.'
+              : 'Box status comes from hooks, not from the model.'
+          }),
           pending
             ? jsx('span', { children: `${pending} edit${pending === 1 ? '' : 's'} waiting for the agent` })
             : null,

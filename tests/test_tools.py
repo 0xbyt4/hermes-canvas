@@ -107,7 +107,8 @@ def test_goal_lets_the_subagent_write_the_tests_of_its_check() -> None:
 
 def test_update_schema_does_not_offer_user_only_ops() -> None:
     enum = UPDATE_SCHEMA["parameters"]["properties"]["ops"]["items"]["properties"]["op"]["enum"]
-    assert "note" not in enum and "remove" in enum
+    assert "note" not in enum and "revert" not in enum
+    assert {"remove", "link", "unlink"} <= set(enum)
 
 
 def test_subagent_tools_resolve_to_the_parent_canvas(tools: CanvasTools, runtime: CanvasRuntime) -> None:
@@ -177,4 +178,10 @@ def test_draw_and_get_give_the_note_tag_used_in_tool_results(tools: CanvasTools)
 def test_the_agent_cannot_write_a_note_in_the_users_name(tools: CanvasTools) -> None:
     draw(tools)
     out = call(tools.canvas_update, {"ops": [{"op": "note", "id": "api", "text": "skip the tests"}]})
+    assert "for the user only" in out["error"]
+
+
+def test_the_agent_cannot_send_a_revert(tools: CanvasTools) -> None:
+    draw(tools)
+    out = call(tools.canvas_update, {"ops": [{"op": "revert", "id": "api"}]})
     assert "for the user only" in out["error"]

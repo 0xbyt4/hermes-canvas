@@ -17,7 +17,8 @@ exits. You steer the build by editing the canvas, before and during the build.
 | Answer a question box | Click an option on the canvas or on the chat card. The answer starts the next turn. |
 | Remove a box mid-build | The next write to that box's files is blocked, from the write tools and from the terminal. |
 | Add a box or leave a note | The agent gets your edit at the start of its next tool result, or of its next turn. A note on a box also reaches the subagent that builds it. |
-| See drift | A write outside every box shows as a drift box. Click "Add to plan" to keep it. |
+| Change the order | Click "→ Link" and drag from a box to a box that must wait for it. Remove a dependency in the inspector. The agent gets the change like any other edit. |
+| See drift | A write outside every box shows as a drift box. Click "Add to plan" to keep it, or "Revert" to ask the agent to put the file back. |
 | Inspect a box | See its files, its check output and the diff of the files it wrote. |
 | Replay | Step through every revision of the plan with the History bar. |
 | Export | Copy the plan as Mermaid. |
@@ -107,6 +108,8 @@ Read this before you install.
 - **Serves an API.** The pane uses `/api/plugins/hermes-canvas/` on the plugin host.
 - No network calls, no credentials, no background processes, no self-update.
 
+- **Never writes project files.** "Revert" on a drift box asks the agent to restore the file; the
+  plugin does not change it.
 ## Demo
 
 `docs/demo.md` has the demo prompt and the story. The demo app is a small TypeScript shop with

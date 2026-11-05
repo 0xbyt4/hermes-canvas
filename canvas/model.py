@@ -6,6 +6,7 @@ globs and a check command, so hooks can set its status from real tool calls.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import asdict, dataclass, field
@@ -82,6 +83,8 @@ class Box:
     options: list[str] = field(default_factory=list)
     answer: str = ""
     note: str = ""
+    # The user asked the agent to undo this drift box's change (user op `revert`).
+    revert_asked: bool = False
     x: float | None = None
     y: float | None = None
 
@@ -93,6 +96,10 @@ class Box:
         kind = raw.get("kind") or ("question" if raw.get("options") else "component")
         if kind not in BOX_KINDS:
             raise CanvasError(f"box kind must be one of {', '.join(BOX_KINDS)}")
+        if kind == "drift":
+            # Only the hooks make drift boxes, from real writes. A drawn one could carry any text
+            # into the user's revert note.
+            raise CanvasError("drift boxes come from writes outside the plan; they cannot be drawn")
         box = cls(
             id=_box_id(raw.get("id")),
             label=_text(raw.get("label"), "label", limit=200, required=True),
@@ -343,7 +350,50 @@ def _op_adopt(doc: Doc, op: dict[str, Any]) -> str:
         box.label = _text(label, "label", limit=200, required=True)
     box.kind = "component"
     box.status = "done"
+    box.revert_asked = False
     return f"added drift file {', '.join(box.files)} to the plan as {box.id}"
+
+
+def _op_link(doc: Doc, op: dict[str, Any]) -> str:
+    """Make box `id` wait for box `after`: one dependency, checked for cycles."""
+    box = doc.require(_box_id(op.get("id")))
+    dep = doc.require(_box_id(op.get("after")))
+    if box.kind != "component":
+        raise CanvasError(f"box {box.id!r} cannot wait for other boxes: only planned work boxes can")
+    if dep.kind not in ("component", "question") or dep.id == box.id:
+        raise CanvasError(f"box {box.id!r} cannot wait for box {dep.id!r}")
+    if box.removed or dep.removed:
+        raise CanvasError(f"box {(box if box.removed else dep).id!r} was removed; restore it first")
+    if dep.id in box.after:
+        raise CanvasError(f"box {box.id!r} already waits for box {dep.id!r}")
+    box.after = [*box.after, dep.id]
+    try:
+        validate_plan(doc.boxes)
+    except CanvasError:
+        box.after = box.after[:-1]
+        raise
+    return f"made {box.id} wait for {dep.id}"
+
+
+def _op_unlink(doc: Doc, op: dict[str, Any]) -> str:
+    box = doc.require(_box_id(op.get("id")))
+    dep_id = _box_id(op.get("after"))
+    if dep_id not in box.after:
+        raise CanvasError(f"box {box.id!r} does not wait for box {dep_id!r}")
+    box.after = [a for a in box.after if a != dep_id]
+    return f"{box.id} no longer waits for {dep_id}"
+
+
+def _op_revert(doc: Doc, op: dict[str, Any]) -> str:
+    """Ask the agent to undo a drift box's change. The agent restores the file; the plugin never
+    writes project files."""
+    box = doc.require(_box_id(op.get("id")))
+    if box.kind != "drift":
+        raise CanvasError(f"box {box.id!r} is not a drift box")
+    if box.removed:
+        raise CanvasError(f"box {box.id!r} was removed; restore it first")
+    box.revert_asked = True
+    return f"asked to undo {', '.join(box.files)}"
 
 
 def _op_note(doc: Doc, op: dict[str, Any]) -> str:
@@ -379,13 +429,22 @@ _OPS = {
     "move": _op_move,
     "adopt": _op_adopt,
     "note": _op_note,
+    "link": _op_link,
+    "unlink": _op_unlink,
+    "revert": _op_revert,
 }
 OP_NAMES = tuple(sorted(_OPS))
 # Ops whose result the canvas shows as the user's own words; the agent may not send them.
-USER_ONLY_OPS = ("note",)
+USER_ONLY_OPS = ("note", "revert")
 
 
 NOTE_CLEARED_PREFIX = "Removed the note on box "
+
+
+def quote_path(path: str) -> str:
+    """A file path as a JSON string: quoted, with control characters escaped. Paths come from
+    tool calls, so they must never read as text of their own in the agent's context."""
+    return json.dumps(path, ensure_ascii=False)
 
 
 def note_set_tail(note: str) -> str:

@@ -22,7 +22,7 @@ import time
 from typing import Any
 
 from .binding import WRITE_TOOLS, Binding, check_test_paths, paths_from_args, paths_from_result, relativize
-from .model import MAIN_ACTOR, MAX_WRITTEN, NOTE_CLEARED_PREFIX, Box, Doc, note_set_tail
+from .model import MAIN_ACTOR, MAX_WRITTEN, NOTE_CLEARED_PREFIX, Box, Doc, note_set_tail, quote_path
 from .runtime import CanvasRuntime
 from .shell import code_paths, shell_scan
 from .store import Edit
@@ -561,7 +561,7 @@ def plan_context(doc: Doc) -> str:
         if box.kind != "drift":
             rows.append("- " + box_summary(box))
     if drift:
-        shown = ", ".join(b.files[0] for b in drift[:MAX_DRIFT_IN_CONTEXT] if b.files)
+        shown = ", ".join(quote_path(b.files[0]) for b in drift[:MAX_DRIFT_IN_CONTEXT] if b.files)
         more = f" and {len(drift) - MAX_DRIFT_IN_CONTEXT} more" if len(drift) > MAX_DRIFT_IN_CONTEXT else ""
         rows.append(f"Writes outside every box (drift): {shown}{more}")
     removed = [b.id for b in doc.boxes if b.removed]
@@ -763,8 +763,9 @@ def box_summary(box: Box) -> str:
 
 
 def _drift_box(doc: Doc, rel: str) -> Box:
+    # A removed drift box (for example one the user had reverted) does not hide a new write.
     for box in doc.boxes:
-        if box.kind == "drift" and box.files == [rel]:
+        if box.kind == "drift" and box.files == [rel] and not box.removed:
             return box
     used = {b.id for b in doc.boxes}
     n = 1

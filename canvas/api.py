@@ -12,15 +12,27 @@ from collections.abc import Callable
 from typing import Any
 
 from .diffs import box_diffs
-from .model import Box, CanvasError, Doc, apply_op, note_edit_text, ready_boxes
+from .model import Box, CanvasError, Doc, apply_op, note_edit_text, quote_path, ready_boxes
 from .runtime import CanvasRuntime
 from .store import EditSpec
 
 logger = logging.getLogger(__name__)
 
-# Ops the pane may send. The user can add a box by name, but files, checks and dependencies of
-# existing boxes (set_files, set_check, set_after) stay with the agent.
-USER_OPS = ("add", "remove", "restore", "rename", "move", "answer", "adopt", "note")
+# Ops the pane may send. The user can add a box by name and add or drop one dependency, but files,
+# checks and the whole dependency list (set_files, set_check, set_after) stay with the agent.
+USER_OPS = (
+    "add",
+    "remove",
+    "restore",
+    "rename",
+    "move",
+    "answer",
+    "adopt",
+    "note",
+    "link",
+    "unlink",
+    "revert",
+)
 USER_ADD_KEYS = ("id", "label", "after")
 MAX_OPS = 20
 EVENT_CHANGED = "changed"
@@ -168,13 +180,32 @@ def edit_note(op: dict[str, Any], before: Box | None, after: Box | None) -> str 
             f"Renamed box '{after.id}' from '{before.label}' to '{after.label}'. Use the new name and intent."
         )
     if name == "adopt" and before.kind == "drift":
-        files = ", ".join(after.files)
+        files = ", ".join(quote_path(f) for f in after.files)
         return (
             f"Added {files}, which you wrote outside the plan, to the plan as box '{after.id}' "
             f"({after.label}). Keep it as part of the work."
         )
     if name == "note" and before.note != after.note:
         return note_edit_text(label, after.note)
+    # Notes come from what changed, not from the op text: ids in ops are trimmed by the model.
+    added = [a for a in after.after if a not in before.after]
+    dropped = [a for a in before.after if a not in after.after]
+    if name == "link" and added:
+        dep = added[0]
+        return f"Made box {label} wait for box '{dep}'. Finish '{dep}' before you build {label}."
+    if name == "unlink" and dropped:
+        dep = dropped[0]
+        return f"Box {label} no longer waits for box '{dep}'. It can start without it."
+    if name == "revert" and not before.revert_asked:
+        files = ", ".join(quote_path(f) for f in after.files)
+        return (
+            f"Undo your own change to {files} (drift box '{after.id}'). Undo only what you wrote: the "
+            "user may have uncommitted work in it. If `git diff` shows only your change, "
+            "`git checkout -- <file>` restores it; if you created the file, delete it. If the file "
+            "has changes you did not make, undo your edit by hand, or ask the user. "
+            f"Then remove box '{after.id}' with canvas_update. If a check fails without this change, "
+            "fix it another way, or stop and ask the user."
+        )
     if name == "answer" and before.answer != after.answer:
         return f"Answered the question {label}: {after.answer}. Build with this choice."
     return None
