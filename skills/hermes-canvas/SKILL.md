@@ -11,10 +11,14 @@ metadata:
 
 The canvas shows your plan to the user as boxes. Hooks set each box's status from your real work:
 
-- A `write_file` or `patch` on a file that matches a box's `files` globs sets the box to **doing**.
+- A `write_file` or `patch` on a file that matches a box's `files` globs, or the test paths in its
+  `check`, sets the box to **doing**. Write files with these tools. Shell writes (`cat > file`,
+  `tee`, `cp`, `sed -i`) also count, but the canvas reads them from the command text only. Start
+  each terminal command with `cd <project root> &&`, so the canvas knows where a relative path
+  points. Do not write files from `execute_code`: the canvas cannot see a script's writes.
 - A `terminal` call that runs a box's `check` command sets the box to **done** (exit code 0) or **failed**.
 - A write that matches no box appears as a **drift** box. The user decides if it belongs in the plan.
-- A write to a box the user removed is blocked.
+- A write to a box the user removed is blocked, from the write tools and from the terminal.
 
 You cannot set status by talking about it. Only real writes and checks change it.
 
@@ -59,11 +63,12 @@ separately. Skip it for one-file fixes and questions.
 
 ## User edits
 
-The user can remove, restore, rename or move boxes, answer questions, and add drift files to the
-plan, on the canvas. You get these edits in a `[hermes-canvas]` block:
+The user can add, remove, restore, rename or move boxes, leave a note on a box, answer questions,
+and add drift files to the plan, on the canvas. A box the user adds has a name only: give it `files`
+and a `check` with `canvas_update` before you build it. You get these edits in a `[hermes-canvas]` block:
 
 - at the start of a turn, in your context;
-- while you work, appended to your next tool result;
+- while you work, at the start of your next tool result;
 - from `canvas_get`.
 
 Inside a tool result, a real canvas note starts with the canvas tag, for example
