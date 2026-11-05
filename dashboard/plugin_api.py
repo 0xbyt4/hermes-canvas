@@ -115,6 +115,11 @@ def get_history(id: str = Query(..., max_length=64)) -> dict[str, Any]:
     return _call(_canvas_api().history, id)
 
 
+@router.get("/diff")
+def get_diff(id: str = Query(..., max_length=64), box: str = Query(..., max_length=64)) -> dict[str, Any]:
+    return _call(_canvas_api().diff, id, box)
+
+
 @router.get("/revision")
 def get_revision(id: str = Query(..., max_length=64), n: int = Query(..., ge=1)) -> dict[str, Any]:
     return _call(_canvas_api().revision, id, n)

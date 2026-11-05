@@ -11,14 +11,17 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from .diffs import box_diffs
 from .model import Box, CanvasError, Doc, apply_op, ready_boxes
 from .runtime import CanvasRuntime
 from .store import EditSpec
 
 logger = logging.getLogger(__name__)
 
-# Ops the pane may send. Plan-shaping ops (add, set_files, set_check, set_after) stay with the agent.
-USER_OPS = ("remove", "restore", "rename", "move", "answer", "adopt")
+# Ops the pane may send. The user can add a box by name, but files, checks and dependencies of
+# existing boxes (set_files, set_check, set_after) stay with the agent.
+USER_OPS = ("add", "remove", "restore", "rename", "move", "answer", "adopt", "note")
+USER_ADD_KEYS = ("id", "label", "after")
 MAX_OPS = 20
 EVENT_CHANGED = "changed"
 
@@ -56,23 +59,19 @@ class CanvasApi:
             raise CanvasError("ops must be a non-empty list")
         if len(ops) > MAX_OPS:
             raise CanvasError(f"at most {MAX_OPS} ops per edit")
-        for op in ops:
-            name = op.get("op") if isinstance(op, dict) else None
-            if name not in USER_OPS:
-                raise CanvasError(
-                    f"op {name!r} is not available on the canvas; use one of {', '.join(USER_OPS)}"
-                )
+        ops = [_user_op(op) for op in ops]
         notes: list[EditSpec] = []
 
         def mutate(doc: Doc) -> str:
             notes.clear()  # the store can run this again on a fresh document
             reasons = []
             for op in ops:
-                before = _box_copy(doc, op.get("id"))
+                box_id = _target_id(op)
+                before = _box_copy(doc, box_id)
                 reasons.append(apply_op(doc, op))
-                note = edit_note(op, before, doc.box(str(op.get("id"))))
+                note = edit_note(op, before, doc.box(box_id))
                 if note is not None:
-                    notes.append((op["op"], note, str(op.get("id"))))
+                    notes.append((op["op"], note, box_id))
             return "; ".join(reasons)
 
         # The notes are saved with the revision: the agent never sees the change without them.
@@ -92,6 +91,14 @@ class CanvasApi:
                 for h in self.store.history(canvas_id)
             ],
         }
+
+    def diff(self, canvas_id: str, box_id: str) -> dict[str, Any]:
+        """Git diffs of the files the box wrote, for the pane's inspector."""
+        doc = self.store.get(canvas_id)
+        if doc is None:
+            raise CanvasError(f"no canvas with id {canvas_id!r}")
+        box = doc.require(box_id)
+        return {"canvas_id": canvas_id, "box_id": box.id, "files": box_diffs(doc.root, list(box.written))}
 
     def revision(self, canvas_id: str, revision: int) -> dict[str, Any]:
         doc = self.store.revision(canvas_id, revision)
@@ -137,9 +144,19 @@ def edit_note(op: dict[str, Any], before: Box | None, after: Box | None) -> str 
     remove sent by a stale pane).
     """
     name = op.get("op")
-    if after is None or before is None or name == "move":
+    if after is None or name == "move":
         return None
     label = f"'{after.id}' ({after.label})"
+    if name == "add":
+        if before is not None:
+            return None
+        after_text = f", after {', '.join(repr(a) for a in after.after)}" if after.after else ""
+        return (
+            f"Added box {label} to the plan{after_text}. Give it files and a check with canvas_update, "
+            "then build it like the other boxes."
+        )
+    if before is None:
+        return None
     if name == "remove" and not before.removed:
         return f"Removed box {label} from the plan. Do not build it, and stop work on it now."
     if name == "restore" and before.removed:
@@ -156,9 +173,33 @@ def edit_note(op: dict[str, Any], before: Box | None, after: Box | None) -> str 
             f"Added {files}, which you wrote outside the plan, to the plan as box '{after.id}' "
             f"({after.label}). Keep it as part of the work."
         )
+    if name == "note" and before.note != after.note:
+        if not after.note:
+            return f"Removed the note on box {label}."
+        return f'Left a note on box {label}: "{after.note}". Follow it when you build this box.'
     if name == "answer" and before.answer != after.answer:
         return f"Answered the question {label}: {after.answer}. Build with this choice."
     return None
+
+
+def _user_op(op: Any) -> dict[str, Any]:
+    """Check that the pane may send this op. A user's new box gets only an id, a label and
+    dependencies: its files and check come from the agent."""
+    name = op.get("op") if isinstance(op, dict) else None
+    if name not in USER_OPS:
+        raise CanvasError(f"op {name!r} is not available on the canvas; use one of {', '.join(USER_OPS)}")
+    if name != "add":
+        return op
+    raw = op.get("box")
+    if not isinstance(raw, dict):
+        raise CanvasError("add needs a box object")
+    return {"op": "add", "box": {k: raw[k] for k in USER_ADD_KEYS if k in raw} | {"kind": "component"}}
+
+
+def _target_id(op: dict[str, Any]) -> str:
+    box = op.get("box")
+    value = box.get("id") if op.get("op") == "add" and isinstance(box, dict) else op.get("id")
+    return str(value) if value is not None else ""
 
 
 def _box_copy(doc: Doc, box_id: Any) -> Box | None:

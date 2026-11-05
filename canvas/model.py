@@ -16,7 +16,8 @@ STATUSES = ("todo", "doing", "done", "failed")
 MAX_TEXT = 4000
 MAX_WRITTEN = 20
 MAX_LIST = 50
-MAX_COORD = 100_000  # board units; the pane draws boxes about 200 wide
+MAX_COORD = 100_000
+MAX_NOTE = 500  # board units; the pane draws boxes about 200 wide
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
@@ -308,6 +309,13 @@ def _op_adopt(doc: Doc, op: dict[str, Any]) -> str:
     return f"added drift file {', '.join(box.files)} to the plan as {box.id}"
 
 
+def _op_note(doc: Doc, op: dict[str, Any]) -> str:
+    """Set the user's note on a box. An empty text clears it."""
+    box = doc.require(_box_id(op.get("id")))
+    box.note = _text(op.get("text"), "text", limit=MAX_NOTE)
+    return f"{'set' if box.note else 'cleared'} the note on {box.id}"
+
+
 def _op_move(doc: Doc, op: dict[str, Any]) -> str:
     box = doc.require(_box_id(op.get("id")))
     for axis in ("x", "y"):
@@ -333,5 +341,8 @@ _OPS = {
     "answer": _op_answer,
     "move": _op_move,
     "adopt": _op_adopt,
+    "note": _op_note,
 }
 OP_NAMES = tuple(sorted(_OPS))
+# Ops whose result the canvas shows as the user's own words; the agent may not send them.
+USER_ONLY_OPS = ("note",)

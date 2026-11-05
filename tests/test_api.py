@@ -103,7 +103,11 @@ def test_answer_question(api: CanvasApi) -> None:
         ([], "non-empty"),
         ("remove", "non-empty"),
         ([{"op": "set_check", "id": "api", "check": "rm -rf /"}], "not available on the canvas"),
-        ([{"op": "add", "box": {"id": "x", "label": "X"}}], "not available on the canvas"),
+        ([{"op": "set_after", "id": "ui", "after": []}], "not available on the canvas"),
+        ([{"op": "add", "box": "x"}], "box object"),
+        ([{"op": "add", "box": {"id": "api", "label": "Again"}}], "already exists"),
+        ([{"op": "add", "box": {"id": "x", "label": "X", "after": ["x"]}}], "cycle"),
+        ([{"op": "note", "id": "api", "text": "n" * 501}], "longer than 500"),
         ([{"op": "remove", "id": "nope"}], "no box"),
         ([{"op": "move", "id": "api"}], "must be a number"),
         ([{"op": "move", "id": "api", "x": float("inf"), "y": 0}], "finite"),
@@ -235,3 +239,31 @@ def test_user_adopts_a_drift_file_into_the_plan(api: CanvasApi, doc_id: str) -> 
 def test_only_drift_boxes_can_be_adopted(api: CanvasApi, doc_id: str) -> None:
     with pytest.raises(CanvasError, match="not a drift box"):
         api.edit(doc_id, [{"op": "adopt", "id": "api"}])
+
+
+def test_user_adds_a_box_by_name_only(api: CanvasApi, doc_id: str) -> None:
+    box = {"id": "coupon", "label": "Coupon field", "after": ["ui"], "check": "rm -rf /", "files": ["**"]}
+    out = api.edit(doc_id, [{"op": "add", "box": box}])
+    added = next(b for b in out["canvas"]["boxes"] if b["id"] == "coupon")
+    assert (added["label"], added["after"], added["check"], added["files"], added["kind"]) == (
+        "Coupon field",
+        ["ui"],
+        "",
+        [],
+        "component",
+    )
+    assert api.store.pending_edits(doc_id)[-1].text == (
+        "Added box 'coupon' (Coupon field) to the plan, after 'ui'. Give it files and a check with "
+        "canvas_update, then build it like the other boxes."
+    )
+
+
+def test_user_note_on_a_box_reaches_the_agent(api: CanvasApi, doc_id: str) -> None:
+    out = api.edit(doc_id, [{"op": "note", "id": "ui", "text": "  Use the brand colors  "}])
+    assert next(b for b in out["canvas"]["boxes"] if b["id"] == "ui")["note"] == "Use the brand colors"
+    api.edit(doc_id, [{"op": "note", "id": "ui", "text": "Use the brand colors"}])  # no change: no note
+    api.edit(doc_id, [{"op": "note", "id": "ui", "text": ""}])
+    assert [e.text for e in api.store.pending_edits(doc_id)] == [
+        "Left a note on box 'ui' (Checkout UI): \"Use the brand colors\". Follow it when you build this box.",
+        "Removed the note on box 'ui' (Checkout UI).",
+    ]
