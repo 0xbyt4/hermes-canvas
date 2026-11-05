@@ -16,11 +16,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import posixpath
+import time
 from typing import Any
 
-from .binding import WRITE_TOOLS, Binding, paths_from_args, paths_from_result, relativize
+from .binding import WRITE_TOOLS, Binding, check_test_paths, paths_from_args, paths_from_result, relativize
 from .model import MAX_WRITTEN, Box, Doc
 from .runtime import CanvasRuntime
+from .shell import code_paths, shell_scan
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +42,20 @@ UNTRUSTED_TOOLS = ("web_search", "web_extract")
 UNTRUSTED_PREFIXES = ("browser_", "mcp_")
 # Hermes replaces very large results with a short preview; edits wait for a smaller result.
 MAX_RESULT_FOR_EDITS = 50_000
+# Hermes keeps each session's terminal cwd between calls; this many sessions are remembered.
+MAX_SHELL_CWDS = 256
+# File times can be coarse; a file this many seconds older than the call still counts as written.
+MTIME_SLACK_S = 1.0
 
 
 class CanvasHooks:
     def __init__(self, runtime: CanvasRuntime) -> None:
         self.runtime = runtime
         self.store = runtime.store
+        # Where the next terminal command of each task starts: task key -> (canvas id, directory).
+        self._shell_cwd: dict[str, tuple[str, str]] = {}
+        # When each running terminal call started: (task key, command) -> time.time().
+        self._call_started: dict[tuple[str, str], float] = {}
 
     # -- pre_tool_call ---------------------------------------------------------------------
 
@@ -59,13 +71,18 @@ class CanvasHooks:
     def _pre_tool_call(
         self, tool_name: str, args: Any, task_id: str, session_id: str
     ) -> dict[str, str] | None:
-        if tool_name not in WRITE_TOOLS:
+        if tool_name not in (*WRITE_TOOLS, "terminal", "execute_code"):
             return None
         doc_id = self.runtime.doc_id_for(task_id, session_id)
         binding = self.runtime.binding(doc_id) if doc_id else None
         if binding is None:
             return None
-        for path in paths_from_args(tool_name, args):
+        if tool_name == "terminal":
+            _bounded_set(self._call_started, _call_key(task_id, session_id, args), time.time())
+        # With an unknown cwd the veto guesses the canvas root: a wrong guess blocks a harmless
+        # write, while no guess would let every relative write past the veto.
+        start = self._start_cwd(task_id, session_id)
+        for path in written_paths(tool_name, args, "" if start is None else start):
             rel = relativize(path, binding.root)
             if rel is None:
                 continue
@@ -110,17 +127,39 @@ class CanvasHooks:
         status: str,
         error_message: str,
     ) -> None:
-        if tool_name not in (*WRITE_TOOLS, "terminal"):
+        if tool_name not in (*WRITE_TOOLS, "terminal", "execute_code"):
             return
         doc_id = self.runtime.doc_id_for(task_id, session_id)
+        start = self._start_cwd(task_id, session_id)
+        started = None
+        if tool_name == "terminal":
+            started = self._call_started.pop(_call_key(task_id, session_id, args), None)
+            paths, end = terminal_scan(args, start)
+            if status != "blocked" and _command_ran(result):
+                self._remember_cwd(task_id, session_id, doc_id, args, result, end)
         if doc_id is None:
+            return
+        if tool_name == "execute_code":
+            # A script's writes are invisible here; only a veto of it is recorded.
+            if status == "blocked" and BLOCK_PREFIX in (error_message or ""):
+                self._record_block(doc_id, tool_name, args)
             return
         if tool_name == "terminal":
             # Hermes reports status "error" for every non-zero exit, so a failing check arrives as
             # "error". Only a plugin block means the command did not run; the result itself tells
             # the other not-run cases apart (see _record_check).
-            if status != "blocked":
-                self._record_check(doc_id, args, result)
+            if status == "blocked":
+                if BLOCK_PREFIX in (error_message or ""):
+                    self._record_block(doc_id, tool_name, args, "" if start is None else start)
+                return
+            # Files written by the shell count like write_file, before the check in the same command.
+            # A failing command may still have written its files (`cat > f` truncates f first).
+            if start is None:
+                paths = self._fresh_root_paths(doc_id, args, started)
+            if paths and _command_ran(result):
+                owner = self.runtime.owner_box(task_id, session_id)
+                self._record_writes(doc_id, paths, owner[1] if owner else "", task_id)
+            self._record_check(doc_id, args, result)
             return
         if status == "blocked":
             if BLOCK_PREFIX in (error_message or ""):
@@ -199,8 +238,8 @@ class CanvasHooks:
 
         self.store.update(doc_id, mutate, "hooks")
 
-    def _record_block(self, doc_id: str, tool_name: str, args: Any) -> None:
-        paths = paths_from_args(tool_name, args)
+    def _record_block(self, doc_id: str, tool_name: str, args: Any, cwd: str | None = "") -> None:
+        paths = written_paths(tool_name, args, cwd)
 
         def mutate(doc: Doc) -> str | None:
             binding = Binding.build(doc)
@@ -213,6 +252,55 @@ class CanvasHooks:
             return None
 
         self.store.update(doc_id, mutate, "hooks")
+
+    # -- terminal cwd ----------------------------------------------------------------------
+
+    def _start_cwd(self, task_id: str, session_id: str) -> str | None:
+        """Where the next terminal command of this task starts, None when it is unknown.
+
+        Hermes keeps a terminal cwd per session and echoes "cwd" in a result when a command
+        changed it. A session can start anywhere (the Desktop workspace, for example), so the
+        cwd is unknown until a command reports it or `cd`s to an absolute path.
+        """
+        record = self._shell_cwd.get(task_id or session_id)
+        return record[1] if record else None
+
+    def _fresh_root_paths(self, doc_id: str, args: Any, started: float | None) -> list[str]:
+        """The writes of a command whose start folder is unknown.
+
+        A session that starts in the root and never runs `cd` gets no cwd echo from Hermes. So a
+        relative path counts as relative to the root, but only when that file changed after the
+        call started: then the command really wrote it there. Absolute paths always count.
+        """
+        guess = terminal_scan(args, "")[0]
+        binding = self.runtime.binding(doc_id)
+        if binding is None or started is None:
+            return [p for p in guess if posixpath.isabs(p)]
+        root = os.path.expanduser(binding.root)
+        return [p for p in guess if posixpath.isabs(p) or _changed_since(os.path.join(root, p), started)]
+
+    def _remember_cwd(
+        self, task_id: str, session_id: str, doc_id: str | None, args: Any, result: Any, end: str | None
+    ) -> None:
+        # A command with its own `workdir` does not move the session's cwd in Hermes.
+        if isinstance(args, dict) and args.get("workdir"):
+            return
+        key = task_id or session_id
+        parsed = _parse_json(result)
+        echo = parsed.get("cwd") if parsed else None
+        if isinstance(echo, str) and posixpath.isabs(echo):
+            cwd = posixpath.normpath(echo)
+            # Subagents may share their parent's Hermes cwd, so a move makes the other tasks of
+            # this canvas start in an unknown place.
+            for other, (other_doc, _cwd) in list(self._shell_cwd.items()):
+                if other != key and doc_id and other_doc == doc_id:
+                    del self._shell_cwd[other]
+        elif end and posixpath.isabs(end) and parsed and parsed.get("exit_code") == 0:
+            cwd = end  # no echo: the command ended where it started, after an absolute `cd`
+        else:
+            return
+        self._shell_cwd.pop(key, None)
+        _bounded_set(self._shell_cwd, key, (doc_id or "", cwd))
 
     # -- subagents -------------------------------------------------------------------------
 
@@ -417,6 +505,64 @@ def edits_context(texts: list[str]) -> str:
     return "\n".join(rows)
 
 
+def written_paths(tool_name: str, args: Any, cwd: str | None = "") -> list[str]:
+    """Paths a write tool, a shell command or a script may write, as given in the call.
+
+    `cwd` is where a terminal command starts ("" = the canvas root, None = unknown).
+    """
+    if not isinstance(args, dict):
+        return []
+    if tool_name == "terminal":
+        return terminal_scan(args, cwd)[0]
+    if tool_name == "execute_code":
+        code = args.get("code")
+        return code_paths(code) if isinstance(code, str) else []
+    return paths_from_args(tool_name, args)
+
+
+def _bounded_set(table: dict[Any, Any], key: Any, value: Any) -> None:
+    """Set a key in a table that keeps only its newest MAX_SHELL_CWDS entries."""
+    table[key] = value
+    while len(table) > MAX_SHELL_CWDS:
+        del table[next(iter(table))]
+
+
+def _call_key(task_id: str, session_id: str, args: Any) -> tuple[str, str]:
+    command = args.get("command") if isinstance(args, dict) else None
+    return (task_id or session_id, command if isinstance(command, str) else "")
+
+
+def _changed_since(path: str, started: float) -> bool:
+    try:
+        return os.stat(path).st_mtime >= started - MTIME_SLACK_S
+    except OSError:
+        return False
+
+
+def terminal_scan(args: Any, cwd: str | None) -> tuple[list[str], str | None]:
+    """The paths a terminal call writes and the directory it ends in; a `workdir` argument wins
+    over `cwd`."""
+    command = args.get("command") if isinstance(args, dict) else None
+    if not isinstance(command, str):
+        return [], cwd
+    workdir = args.get("workdir")
+    if isinstance(workdir, str) and workdir:
+        cwd = posixpath.normpath(workdir) if posixpath.isabs(workdir) else None
+    return shell_scan(command, cwd)
+
+
+def _command_ran(result: Any) -> bool:
+    """Did the terminal command run, whatever its exit code?"""
+    parsed = _parse_json(result)
+    if parsed is None or parsed.get("status") not in (None, "ok"):
+        return False
+    code = parsed.get("exit_code")
+    if not isinstance(code, int) or isinstance(code, bool):
+        return False
+    output = "\n".join(str(parsed.get(k) or "") for k in ("output", "error")).strip()
+    return not (code < 0 and output.startswith(NOT_RUN_PREFIX))
+
+
 def note_tag(key: str) -> str:
     """The tag that starts every real canvas note inside a tool result."""
     return f"[hermes-canvas {key}]"
@@ -502,7 +648,8 @@ def subagent_context(doc: Doc, box: Box) -> str:
         f"Project root: {doc.root}.",
     ]
     if box.files:
-        parts.append(f"Write only files that match: {', '.join(box.files)}. Other writes show as drift.")
+        owned = [*box.files, *check_test_paths(doc, box)]
+        parts.append(f"Write only files that match: {', '.join(owned)}. Other writes show as drift.")
     if box.check:
         parts.append(f"Run this check before you finish: {box.check}")
     if box.note:

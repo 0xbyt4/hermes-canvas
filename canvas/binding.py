@@ -21,6 +21,58 @@ _STDERR_REDIRECT_RE = re.compile(r"^2>\s*(?:&1|\S+)\s*")
 _CD_PREFIX_RE = re.compile(r"^\s*cd\s+(?:\"[^\"]*\"|'[^']*'|\S+)\s*(?:&&|;)\s*")
 _STDERR_SUFFIX_RE = re.compile(r"\s+2>&1\s*$")
 _WILDCARDS = set("*?")
+_PATH_ARG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@+-]*(?:/[A-Za-z0-9_.@+-]+)+/?$")
+_TEST_MODULE_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
+
+
+# Flags whose value is a path that is not a test target (config files, other package roots).
+_PATH_VALUE_FLAGS = {
+    "-c",
+    "-C",
+    "-p",
+    "--config",
+    "--prefix",
+    "--manifest-path",
+    "--rootdir",
+    "--project",
+    "--dir",
+    "--cwd",
+}
+
+
+def check_globs(check: str) -> list[str]:
+    """File globs implied by the path arguments of a check command.
+
+    The tests a check runs belong to its box, even when the plan's `files` list only the source:
+    `npx vitest run tests/payments` covers `tests/payments/**` and `tests/payments*` (vitest filters
+    by prefix), `tests/receipt.test.ts` covers that file, and `python3 -m unittest tests.test_tax`
+    covers `tests/test_tax.py`. Arguments without a `/` (like `tests`) are too broad and are skipped,
+    and so are the values of flags like `-c` or `--prefix`.
+    """
+    try:
+        tokens = shlex.split(normalize_command(check))
+    except ValueError:
+        return []
+    globs: list[str] = []
+    skip_next = False
+    for token in tokens[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in _PATH_VALUE_FLAGS:
+            skip_next = True
+            continue
+        if token.startswith("-") or ".." in token.split("/"):
+            continue
+        if _PATH_ARG_RE.match(token):
+            path = token.rstrip("/")
+            if posixpath.splitext(path)[1] and not token.endswith("/"):
+                globs.append(path)
+            else:
+                globs += [f"{path}/**", f"{path}*"]
+        elif _TEST_MODULE_RE.match(token) and "test" in token.lower():
+            globs.append(token.replace(".", "/") + ".py")
+    return globs
 
 
 def glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -171,6 +223,26 @@ def goal_tag(doc_id: str, box_id: str) -> str:
     return f"[canvas:{doc_id}/{box_id}]"
 
 
+def owned_check_globs(doc: Doc) -> dict[str, list[str]]:
+    """The check paths each active component box owns.
+
+    Test paths from a check count as the box's files, unless another box's check names the same
+    path (a shared test folder). They only count writes: the veto uses `files` only.
+    """
+    implied = {b.id: check_globs(b.check) for b in doc.boxes if b.kind == "component" and not b.removed}
+    seen: dict[str, int] = {}
+    for globs in implied.values():
+        for g in set(globs):
+            seen[g] = seen.get(g, 0) + 1
+    return {box_id: [g for g in globs if seen[g] == 1] for box_id, globs in implied.items()}
+
+
+def check_test_paths(doc: Doc, box: Box) -> list[str]:
+    """The check paths of `box` to name to an agent: folders as `dir/**`, files as they are."""
+    owned = owned_check_globs(doc).get(box.id, [])
+    return [g for g in owned if (g.endswith("/**") or not g.endswith("*")) and g not in box.files]
+
+
 @dataclass
 class Binding:
     """Compiled matchers for one document revision."""
@@ -186,16 +258,17 @@ class Binding:
     @classmethod
     def build(cls, doc: Doc) -> Binding:
         binding = cls(doc_id=doc.id, root=doc.root, revision=doc.revision)
+        implied = owned_check_globs(doc)
         for box in doc.boxes:
-            if not box.files:
+            extra = implied.get(box.id, [])
+            if not box.files and not extra:
                 continue
-            patterns = [glob_to_regex(g) for g in box.files]
             if not box.removed and box.kind in ("component", "drift"):
-                binding.active.append((box.id, patterns))
+                binding.active.append((box.id, [glob_to_regex(g) for g in [*box.files, *extra]]))
                 if box.kind == "component":
                     binding.components.add(box.id)
-            elif box.removed and box.kind == "component":
-                binding.removed.append((box.id, patterns))
+            elif box.removed and box.kind == "component" and box.files:
+                binding.removed.append((box.id, [glob_to_regex(g) for g in box.files]))
         for box in doc.active_boxes():
             if box.check:
                 binding.checks.append((box.id, normalize_command(box.check)))

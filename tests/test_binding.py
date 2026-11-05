@@ -5,6 +5,7 @@ from helpers import SHOP_PLAN, plan
 
 from canvas.binding import (
     Binding,
+    check_globs,
     glob_to_regex,
     goal_tag,
     normalize_command,
@@ -15,6 +16,7 @@ from canvas.binding import (
     relativize,
 )
 from canvas.model import Box, CanvasError, Doc
+from canvas.shell import code_paths, shell_write_paths
 
 
 @pytest.mark.parametrize(
@@ -212,3 +214,55 @@ def test_paths_from_result() -> None:
     assert paths_from_result(result) == ["/ws/src/a.ts", "/ws/src/b.ts"]
     assert paths_from_result({"resolved_path": "/ws/x.ts"}) == ["/ws/x.ts"]
     assert paths_from_result(None) == []
+
+
+@pytest.mark.parametrize(
+    "check, globs",
+    [
+        ("npx vitest run tests/payments", ["tests/payments/**", "tests/payments*"]),
+        ("cd /repo && npx vitest run tests/receipt.test.ts", ["tests/receipt.test.ts"]),
+        ("python3 -m unittest tests.test_tax", ["tests/test_tax.py"]),
+        ("npm test", []),
+        ("npx vitest run tests", []),
+        ("pytest -q ../other/test_x.py", []),
+        ("", []),
+    ],
+)
+def test_check_paths_become_box_files(check: str, globs: list[str]) -> None:
+    assert check_globs(check) == globs
+
+
+def test_tests_of_a_check_are_not_drift() -> None:
+    box = Box(id="api", label="API", files=["src/payments/**"], check="npx vitest run tests/payments")
+    binding = Binding.build(Doc(id="cv-0123456789", session_id="s", title="t", root="/r", boxes=[box]))
+    assert binding.boxes_for_path("tests/payments/api.test.ts") == ["api"]
+    assert binding.boxes_for_path("tests/payments.test.ts") == ["api"]
+    assert binding.boxes_for_path("tests/refund.test.ts") == []
+
+
+@pytest.mark.parametrize(
+    "command, paths",
+    [
+        (
+            "cat > src/a.ts <<'EOF'\nconst x = '<b>' > 1\necho no > nope.txt\nEOF\nnpx vitest run",
+            ["src/a.ts"],
+        ),
+        ("echo hi >> out.txt; tee -a b.txt c.txt < in.txt", ["out.txt", "b.txt", "c.txt"]),
+        ("cp a.ts src/b.ts && mv x.ts src/y.ts", ["src/b.ts", "src/y.ts"]),
+        ("sed -i '' s/a/b/ src/x.ts", ["src/x.ts"]),
+        ("sed -i.bak -e s/a/b/ f1 f2", ["f1", "f2"]),
+        ("sed -n 1,5p g.ts", []),
+        ("FOO=1 touch t.txt", ["t.txt"]),
+        ("npx vitest run tests 2>&1 | tail -5", []),
+        ("npm test > /dev/null 2>&1", []),
+        ("cmd &> log.txt", ["log.txt"]),
+        ("echo 'unterminated", []),
+    ],
+)
+def test_shell_write_paths(command: str, paths: list[str]) -> None:
+    assert shell_write_paths(command) == paths
+
+
+def test_code_paths_reads_path_literals() -> None:
+    code = "open('src/a.ts', 'w'); Path(\"/repo/b/c.py\").write_text('hi'); x = 'plain'; y = 'v1.2'"
+    assert code_paths(code) == ["src/a.ts", "/repo/b/c.py", "v1.2"]

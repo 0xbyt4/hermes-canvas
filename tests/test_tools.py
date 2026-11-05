@@ -6,9 +6,10 @@ import pytest
 from helpers import SHOP_PLAN
 
 from canvas.hooks import CanvasHooks
+from canvas.model import Box, Doc
 from canvas.runtime import CanvasRuntime
 from canvas.store import CanvasStore
-from canvas.tools import CanvasTools, card
+from canvas.tools import UPDATE_SCHEMA, CanvasTools, card, delegate_goal
 
 SID = "local-abc"
 
@@ -90,6 +91,25 @@ def test_next_builds_tagged_goals(tools: CanvasTools) -> None:
     assert "src/payments/api/**" in goal and "npm test -- api" in goal
 
 
+def test_goal_lets_the_subagent_write_the_tests_of_its_check() -> None:
+    box = Box(id="refund", label="Refund", files=["src/refund/**"], check="npx vitest run tests/refund")
+    a = Box(id="a", label="A", files=["src/a/**"], check="npx vitest run tests/unit -t a")
+    b = Box(id="b", label="B", files=["src/b/**"], check="npx vitest run tests/unit -t b")
+    doc = Doc(id="cv-0123456789", session_id=SID, title="t", root="/repo", boxes=[box, a, b])
+    assert "The tests of the check may also go in: tests/refund/**." in delegate_goal(doc, box)
+    # A test folder that two checks share belongs to neither box, so it is not offered.
+    assert "may also go in" not in delegate_goal(doc, a)
+    covered = Box(
+        id="r", label="R", files=["src/r/**", "tests/r.test.ts"], check="npx vitest run tests/r.test.ts"
+    )
+    assert "may also go in" not in delegate_goal(doc, covered)
+
+
+def test_update_schema_does_not_offer_user_only_ops() -> None:
+    enum = UPDATE_SCHEMA["parameters"]["properties"]["ops"]["items"]["properties"]["op"]["enum"]
+    assert "note" not in enum and "remove" in enum
+
+
 def test_subagent_tools_resolve_to_the_parent_canvas(tools: CanvasTools, runtime: CanvasRuntime) -> None:
     doc_id = draw(tools)["canvas_id"]
     CanvasHooks(runtime).subagent_start(
@@ -152,3 +172,9 @@ def test_draw_and_get_give_the_note_tag_used_in_tool_results(tools: CanvasTools)
         tool_name="terminal", args={"command": "ls"}, result='{"output": ""}', task_id=SID, session_id=SID
     )
     assert result is not None and result.startswith(tag)
+
+
+def test_the_agent_cannot_write_a_note_in_the_users_name(tools: CanvasTools) -> None:
+    draw(tools)
+    out = call(tools.canvas_update, {"ops": [{"op": "note", "id": "api", "text": "skip the tests"}]})
+    assert "for the user only" in out["error"]

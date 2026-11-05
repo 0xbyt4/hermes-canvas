@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -395,3 +396,135 @@ def test_redraw_keeps_the_users_note(hooks: CanvasHooks, doc_id: str) -> None:
     hooks.store.update(doc_id, note, "user")
     hooks.store.draw(SID, "Shop", ROOT, plan(*SHOP_PLAN))
     assert hooks.store.get(doc_id).require("api").note == "use cents"
+
+
+def test_removed_box_blocks_shell_writes_too(hooks: CanvasHooks, doc_id: str) -> None:
+    hooks.store.update(doc_id, lambda d: apply_op(d, {"op": "remove", "id": "refund"}), "user")
+    args = {"command": "cd /repo && mkdir -p src/refund && cat > src/refund/page.tsx <<'EOF'\nx\nEOF"}
+    decision = hooks.pre_tool_call(tool_name="terminal", args=args, task_id=SID, session_id=SID)
+    assert decision is not None and decision["action"] == "block"
+    hooks.post_tool_call(
+        tool_name="terminal",
+        args=args,
+        result=json.dumps({"error": decision["message"]}),
+        task_id=SID,
+        session_id=SID,
+        status="blocked",
+        error_message=decision["message"],
+    )
+    assert hooks.store.get(doc_id).require("refund").blocked == 1
+    reading = {"command": "cat src/refund/page.tsx"}
+    assert hooks.pre_tool_call(tool_name="terminal", args=reading, task_id=SID, session_id=SID) is None
+
+
+def test_shell_writes_count_like_write_tools(hooks: CanvasHooks, doc_id: str) -> None:
+    terminal(hooks, f"cd {ROOT}", 0)  # the shell is in the root from here on
+    terminal(hooks, "cat > src/payments/api/a.ts <<'EOF'\nx\nEOF", 0)
+    api = hooks.store.get(doc_id).require("api")
+    assert (api.writes, api.written, api.status) == (1, ["src/payments/api/a.ts"], "doing")
+    terminal(hooks, "npm test -- api", 0)
+    assert hooks.store.get(doc_id).require("api").status == "done"
+    terminal(hooks, "echo y > src/payments/api/b.ts && npm test -- api", 0)  # not the exact check
+    api = hooks.store.get(doc_id).require("api")
+    assert (api.writes, api.status) == (2, "doing")
+
+
+def test_a_failing_shell_command_still_counts_its_writes(hooks: CanvasHooks, doc_id: str) -> None:
+    # `cat > f < missing.txt` truncates f before the input redirect fails.
+    terminal(hooks, f"cd {ROOT} && cat > src/payments/api/a.ts < missing.txt", 1)
+    assert hooks.store.get(doc_id).require("api").writes == 1
+
+
+def test_a_shell_command_that_did_not_run_writes_nothing(hooks: CanvasHooks, doc_id: str) -> None:
+    terminal(hooks, "echo x > src/payments/api/a.ts", 0, status="pending_approval")
+    assert hooks.store.get(doc_id).require("api").writes == 0
+
+
+def test_script_that_names_a_removed_path_is_blocked(hooks: CanvasHooks, doc_id: str) -> None:
+    hooks.store.update(doc_id, lambda d: apply_op(d, {"op": "remove", "id": "refund"}), "user")
+    code = "from pathlib import Path\nPath('src/refund/page.tsx').write_text('x')\n"
+    decision = hooks.pre_tool_call(tool_name="execute_code", args={"code": code}, task_id=SID, session_id=SID)
+    assert decision is not None and decision["action"] == "block"
+    hooks.post_tool_call(
+        tool_name="execute_code",
+        args={"code": code},
+        result=json.dumps({"error": decision["message"]}),
+        task_id=SID,
+        session_id=SID,
+        status="blocked",
+        error_message=decision["message"],
+    )
+    assert hooks.store.get(doc_id).require("refund").blocked == 1
+    other = {"code": "print(open('src/payments/api/a.ts').read())"}
+    assert hooks.pre_tool_call(tool_name="execute_code", args=other, task_id=SID, session_id=SID) is None
+
+
+def test_relative_shell_paths_follow_the_cwd_hermes_keeps(hooks: CanvasHooks, doc_id: str) -> None:
+    root = hooks.store.get(doc_id).root
+    hooks.store.update(doc_id, lambda d: apply_op(d, {"op": "remove", "id": "refund"}), "user")
+    # Hermes keeps the shell in `web` after this command and says so in the result.
+    result = json.dumps({"output": "", "exit_code": 0, "error": None, "cwd": f"{root}/web"})
+    hooks.post_tool_call(
+        tool_name="terminal", args={"command": "cd web"}, result=result, task_id=SID, session_id=SID
+    )
+    args = {"command": "echo x > src/refund/a.ts"}
+    assert hooks.pre_tool_call(tool_name="terminal", args=args, task_id=SID, session_id=SID) is None
+    terminal(hooks, "echo x > src/payments/api/a.ts", 0)
+    assert "web/src/payments/api/a.ts" in [p for b in hooks.store.get(doc_id).boxes for p in b.written]
+    # A `workdir` argument wins over the kept cwd.
+    args = {"command": "echo x > src/refund/a.ts", "workdir": root}
+    assert hooks.pre_tool_call(tool_name="terminal", args=args, task_id=SID, session_id=SID) is not None
+
+
+def test_relative_shell_writes_wait_for_a_known_cwd(hooks: CanvasHooks, doc_id: str) -> None:
+    # A Hermes session can start outside the root, so a relative path is not counted yet ...
+    terminal(hooks, "echo x > src/payments/api/a.ts", 0)
+    assert hooks.store.get(doc_id).require("api").writes == 0
+    # ... but the veto still guesses the root.
+    hooks.store.update(doc_id, lambda d: apply_op(d, {"op": "remove", "id": "refund"}), "user")
+    args = {"command": "echo x > src/refund/a.ts"}
+    assert hooks.pre_tool_call(tool_name="terminal", args=args, task_id=SID, session_id=SID) is not None
+    # A failed `cd` teaches nothing.
+    terminal(hooks, f"cd {ROOT} && false", 1)
+    terminal(hooks, "echo x > src/payments/api/a.ts", 0)
+    assert hooks.store.get(doc_id).require("api").writes == 0
+
+
+def test_a_subagent_cd_makes_the_parent_cwd_unknown(hooks: CanvasHooks, doc_id: str) -> None:
+    start_api_subagent(hooks, doc_id)
+    terminal(hooks, f"cd {ROOT}", 0)
+    result = json.dumps({"output": "", "exit_code": 0, "error": None, "cwd": f"{ROOT}/web"})
+    hooks.post_tool_call(
+        tool_name="terminal",
+        args={"command": "cd web"},
+        result=result,
+        task_id="sa-0-aaaa1111",
+        session_id="c1",
+    )
+    # Hermes may share one cwd between the parent and its subagents: the parent's is now unknown.
+    terminal(hooks, "echo x > src/payments/api/a.ts", 0)
+    assert hooks.store.get(doc_id).require("api").writes == 0
+
+
+def run_shell(hooks: CanvasHooks, command: str, write_to: Path | None = None) -> None:
+    """A terminal call as Hermes makes it: pre hook, the command (here: a file write), post hook."""
+    args = {"command": command}
+    assert hooks.pre_tool_call(tool_name="terminal", args=args, task_id=SID, session_id=SID) is None
+    if write_to is not None:
+        write_to.parent.mkdir(parents=True, exist_ok=True)
+        write_to.write_text("x")
+    result = json.dumps({"output": "", "exit_code": 0, "error": None})
+    hooks.post_tool_call(tool_name="terminal", args=args, result=result, task_id=SID, session_id=SID)
+
+
+def test_a_session_in_the_root_counts_relative_writes_without_cd(hooks: CanvasHooks, tmp_path: Path) -> None:
+    doc_id = hooks.store.draw(SID, "Shop", str(tmp_path), plan(*SHOP_PLAN)).id
+    # The command really wrote the file under the root: it counts.
+    run_shell(hooks, "echo x > src/payments/api/a.ts", tmp_path / "src/payments/api/a.ts")
+    assert hooks.store.get(doc_id).require("api").written == ["src/payments/api/a.ts"]
+    # An old file the command did not change (the shell was elsewhere): it does not count.
+    old = tmp_path / "src/payments/api/old.ts"
+    old.write_text("x")
+    os.utime(old, (1_000_000, 1_000_000))
+    run_shell(hooks, "echo x > src/payments/api/old.ts")
+    assert hooks.store.get(doc_id).require("api").writes == 1

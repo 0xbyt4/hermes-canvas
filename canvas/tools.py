@@ -11,9 +11,9 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-from .binding import goal_tag, normalize_globs
+from .binding import check_test_paths, goal_tag, normalize_globs
 from .hooks import box_summary, note_tag
-from .model import OP_NAMES, Box, CanvasError, Doc, apply_op, ready_boxes
+from .model import OP_NAMES, USER_ONLY_OPS, Box, CanvasError, Doc, apply_op, ready_boxes
 from .runtime import CanvasRuntime
 
 TOOLSET = "hermes_canvas"
@@ -87,7 +87,9 @@ UPDATE_SCHEMA: dict[str, Any] = {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "properties": {"op": {"type": "string", "enum": list(OP_NAMES)}},
+                    "properties": {
+                        "op": {"type": "string", "enum": [o for o in OP_NAMES if o not in USER_ONLY_OPS]}
+                    },
                     "required": ["op"],
                 },
             }
@@ -161,6 +163,11 @@ class CanvasTools:
             ops = args.get("ops")
             if not isinstance(ops, list) or not ops:
                 raise CanvasError("ops must be a non-empty list")
+            for op in ops:
+                if isinstance(op, dict) and op.get("op") in USER_ONLY_OPS:
+                    raise CanvasError(
+                        f"op {op.get('op')!r} is for the user only; the canvas shows it as their words"
+                    )
             doc_id = self._doc_id(task_id, session_id)
 
             def mutate(doc: Doc) -> str:
@@ -232,8 +239,15 @@ def delegate_goal(doc: Doc, box: Box) -> str:
     parts = [f"{goal_tag(doc.id, box.id)} {box.label}.", f"Project root: {doc.root}."]
     if box.files:
         parts.append(f"Write only: {', '.join(box.files)}.")
+        tests = check_test_paths(doc, box)
+        if tests:
+            # Without this, a subagent that may not write its check's tests cannot pass the check.
+            parts.append(f"The tests of the check may also go in: {', '.join(tests)}.")
     if box.check:
         parts.append(f"Done when this passes: {box.check}")
+    parts.append(
+        "Write files with write_file or patch, not with execute_code, so the canvas sees each write."
+    )
     if box.note:
         parts.append(f"User note: {box.note}")
     return " ".join(parts)
