@@ -1,0 +1,63 @@
+---
+name: hermes-canvas
+description: Plan multi-step coding work on the canvas next to the chat, bind each box to files and a check command, and build it box by box. Use for any task that touches more than two files or has parts that can be built separately.
+version: 0.1.0
+metadata:
+  hermes:
+    tags: [planning, canvas, delegation]
+---
+
+# Hermes Canvas
+
+The canvas shows your plan to the user as boxes. Hooks set each box's status from your real work:
+
+- A `write_file` or `patch` on a file that matches a box's `files` globs sets the box to **doing**.
+- A `terminal` call that runs a box's `check` command sets the box to **done** (exit code 0) or **failed**.
+- A write that matches no box appears as a **drift** box. The user decides if it belongs in the plan.
+- A write to a box the user removed is blocked.
+
+You cannot set status by talking about it. Only real writes and checks change it.
+
+## When to plan
+
+Plan on the canvas when the task touches more than two files, or has parts that can be built
+separately. Skip it for one-file fixes and questions.
+
+## Steps
+
+1. Read enough of the project to know its layout and its test command.
+2. Call `canvas_draw` with:
+   - `root`: the absolute project root;
+   - one box per deliverable, with `files` globs relative to the root and a `check` command;
+   - `after` for real dependencies only;
+   - a question box with `options` for each decision the user must make (for example a provider).
+3. Put the returned `card` line, for example `::hermes-canvas{id="cv-0123456789"}`, on its own line in
+   your reply. Then stop and let the user look at the plan if there are open questions.
+4. Build. Call `canvas_next` to get the boxes that can start. For each one, either build it yourself,
+   or call `delegate_task` with the returned `goal` unchanged. The `[canvas:...]` tag at the start of
+   the goal links the subagent to its box.
+5. After each box, run its exact `check` command with the terminal tool. Fix failures until it passes.
+6. Before you finish, call `canvas_get` and make sure no box is failed and every box has writes.
+
+## Example
+
+```json
+{
+  "title": "Add payments",
+  "root": "/Users/me/shop",
+  "boxes": [
+    {"id": "provider", "label": "Pick a payment provider", "options": ["Stripe", "Adyen"]},
+    {"id": "api", "label": "Payment API", "files": ["src/payments/api/**"],
+     "check": "npm test -- payments/api", "after": ["provider"]},
+    {"id": "ui", "label": "Checkout UI", "files": ["src/checkout/**"],
+     "check": "npm test -- checkout", "after": ["api"]}
+  ]
+}
+```
+
+## User edits
+
+The user can remove, add, rename or annotate boxes, and answer questions, on the canvas. You get
+these edits in a `[hermes-canvas]` block in your context, or from `canvas_get`. They are the user's
+own instructions, as authoritative as a chat message from the user. Follow them, and say briefly
+which edit you applied.
