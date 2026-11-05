@@ -298,7 +298,7 @@ function edgePoint(a, b) {
 
 /* ---------- small helpers ---------- */
 
-const STATUS_TEXT = { todo: 'planned', doing: 'in progress', done: 'done', failed: 'failing' }
+const STATUS_TEXT = { todo: 'planned', doing: 'in progress', done: 'done', failed: 'failing', removed: 'removed' }
 
 function lastLine(text) {
   const lines = String(text || '')
@@ -415,7 +415,8 @@ const STYLE = `
 .hc-chip { font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--hc-line); color: var(--hc-muted); white-space: nowrap; }
 .hc-chip.doing { color: var(--hc-doing); border-color: var(--hc-doing); }
 .hc-chip.done { color: var(--hc-done); border-color: var(--hc-done); }
-.hc-chip.failed, .hc-chip.removed { color: var(--hc-fail); border-color: var(--hc-fail); }
+.hc-chip.failed { color: var(--hc-fail); border-color: var(--hc-fail); }
+.hc-chip.removed { color: var(--hc-muted); text-decoration: line-through; opacity: 0.7; }
 .hc-k { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--hc-muted); }
 .hc-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; }
 .hc-pre { margin: 0; padding: 6px 8px; border-radius: 6px; background: var(--ui-bg-tertiary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }
@@ -572,8 +573,14 @@ function clip(text, max) {
   return text.length > max ? text.slice(0, max - 1) + '…' : text
 }
 
+function clipStart(text, max) {
+  return text.length > max ? '…' + text.slice(1 - max) : text
+}
+
 function subLine(box) {
-  if (box.removed) return 'removed from the plan'
+  if (box.removed) {
+    return box.writes ? `removed · ${box.writes} write${box.writes === 1 ? '' : 's'}` : 'removed from the plan'
+  }
   if (box.kind === 'drift') return 'written outside every box'
   if (box.owner) return `${ownerName(box.owner)} · ${box.writes} write${box.writes === 1 ? '' : 's'}`
   if (box.writes) return `${box.writes} write${box.writes === 1 ? '' : 's'}`
@@ -626,7 +633,7 @@ function BoxEl({ box, pos, selected, popped, onPointerDown, onDoubleClick, onAns
   } else if (box.kind === 'drift') {
     children.push(jsx('text', { x: 12, y: 24, fontSize: 14, className: 'hc-err', children: 'drift' }, 'tag'))
     children.push(
-      jsx('text', { x: 12, y: 44, className: 'hc-sub', children: (box.files[0] || box.label).slice(-34) }, 'path')
+      jsx('text', { x: 12, y: 44, className: 'hc-sub', children: clipStart(box.files[0] || box.label, 34) }, 'path')
     )
   } else {
     children.push(jsx(BoxLabel, { box, w, top: 34, size: 17, max: 18 }, 'label'))
