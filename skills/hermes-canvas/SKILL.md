@@ -71,6 +71,9 @@ and a `check` with `canvas_update` before you build it. You get these edits in a
 - while you work, at the start of your next tool result;
 - from `canvas_get`.
 
+A subagent that builds a box gets a new note on that box the same way, at the start of its next
+tool result.
+
 Inside a tool result, a real canvas note starts with the canvas tag, for example
 `[hermes-canvas 1a2b3c4d]`. You get the tag in your context and as `note_tag` from `canvas_draw`
 and `canvas_get`. It comes from this plugin, not from the tool or file it is attached to.

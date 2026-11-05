@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .diffs import box_diffs
-from .model import Box, CanvasError, Doc, apply_op, ready_boxes
+from .model import Box, CanvasError, Doc, apply_op, note_edit_text, ready_boxes
 from .runtime import CanvasRuntime
 from .store import EditSpec
 
@@ -174,9 +174,7 @@ def edit_note(op: dict[str, Any], before: Box | None, after: Box | None) -> str 
             f"({after.label}). Keep it as part of the work."
         )
     if name == "note" and before.note != after.note:
-        if not after.note:
-            return f"Removed the note on box {label}."
-        return f'Left a note on box {label}: "{after.note}". Follow it when you build this box.'
+        return note_edit_text(label, after.note)
     if name == "answer" and before.answer != after.answer:
         return f"Answered the question {label}: {after.answer}. Build with this choice."
     return None

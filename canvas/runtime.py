@@ -14,7 +14,7 @@ import threading
 from dataclasses import dataclass
 
 from .binding import Binding, parse_goal_tag
-from .model import Doc
+from .model import NOTE_CLEARED_PREFIX, Box, Doc
 from .store import CanvasStore
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,10 @@ class SubagentLink:
     doc_id: str
     box_id: str
     finished: str = ""
+    # The box note this subagent has seen; None until its first model call.
+    note_seen: str | None = None
+    # True when the last note change this subagent got was the user clearing the note.
+    cleared_seen: bool = False
 
 
 class CanvasRuntime:
@@ -162,6 +166,44 @@ class CanvasRuntime:
             if child_session_id:
                 self._child_sessions[child_session_id] = subagent_id
         return link
+
+    def see_note(self, link: SubagentLink, note: str) -> None:
+        """Record the box note a subagent got in its context when it started."""
+        with self._lock:
+            link.note_seen = note
+            link.cleared_seen = False
+
+    def new_box_note(self, link: SubagentLink) -> Box | None:
+        """The subagent's box, if the user changed its note since the subagent last saw it.
+
+        Reading the box and recording the note happen under one lock, so two parallel tool
+        results of one subagent cannot deliver an older note after a newer one.
+        """
+        with self._lock:
+            doc = self.store.get(link.doc_id) if link.doc_id and link.box_id else None
+            box = doc.box(link.box_id) if doc else None
+            if box is None or box.note == (link.note_seen or ""):
+                return None
+            if not box.note:
+                # A note can also vanish when the agent redraws the plan without the box and
+                # then with it again. Only the user's own clear is news for the subagent.
+                last = self.store.latest_edit(doc.id, box.id, "note")
+                if last is None or not last.text.startswith(NOTE_CLEARED_PREFIX):
+                    return None
+            link.note_seen = box.note
+            link.cleared_seen = not box.note
+            return box
+
+    def note_reached_subagent(self, doc_id: str, box_id: str, note: str) -> bool:
+        """Whether a subagent that builds this box got this note, or got the clear for ''."""
+        with self._lock:
+            return any(
+                link.doc_id == doc_id
+                and link.box_id == box_id
+                and link.note_seen == note
+                and (bool(note) or link.cleared_seen)
+                for link in self._subagents.values()
+            )
 
     def finish_subagent(self, child_session_id: str, status: str) -> SubagentLink | None:
         with self._lock:

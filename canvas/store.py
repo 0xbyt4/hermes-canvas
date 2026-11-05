@@ -218,6 +218,16 @@ class CanvasStore:
             ).fetchall()
         return [Edit(*row) for row in rows]
 
+    def latest_edit(self, doc_id: str, box_id: str, kind: str) -> Edit | None:
+        """The newest edit of `kind` on a box, delivered or not."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, doc_id, kind, text, box_id, created_at FROM edits "
+                "WHERE doc_id = ? AND box_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+                (doc_id, box_id, kind),
+            ).fetchone()
+        return Edit(*row) if row else None
+
     def take_pending_edits(self, doc_id: str) -> list[Edit]:
         """Return the pending edits and mark them delivered, so each edit reaches the agent once."""
         with self._lock:

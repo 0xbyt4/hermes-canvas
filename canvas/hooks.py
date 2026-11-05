@@ -22,9 +22,10 @@ import time
 from typing import Any
 
 from .binding import WRITE_TOOLS, Binding, check_test_paths, paths_from_args, paths_from_result, relativize
-from .model import MAX_WRITTEN, Box, Doc
+from .model import MAX_WRITTEN, NOTE_CLEARED_PREFIX, Box, Doc, note_set_tail
 from .runtime import CanvasRuntime
 from .shell import code_paths, shell_scan
+from .store import Edit
 
 logger = logging.getLogger(__name__)
 
@@ -378,14 +379,17 @@ class CanvasHooks:
         if self.runtime.link_for(task_id, session_id) is not None:
             # Subagents get their box (or the plan), never the user's pending edits: those belong
             # to the main agent, which owns the plan.
+            link = self.runtime.link_for(task_id, session_id)
             owner = self.runtime.owner_box(task_id, session_id)
             box = doc.box(owner[1]) if owner else None
+            if link is not None and box is not None:
+                self.runtime.see_note(link, box.note)
             text = subagent_context(doc, box) if box is not None else plan_context(doc)
             return {"context": f"{text}\n{note_key_context(self.runtime.note_key(doc.id))}"}
         edits = self.store.take_pending_edits(doc.id)
         lines = [plan_context(doc), note_key_context(self.runtime.note_key(doc.id))]
         if edits:
-            lines.append(edits_context([e.text for e in edits]))
+            lines.append(edits_context(self._edit_texts(doc, edits)))
         return {"context": "\n\n".join(lines)}
 
     # -- transform_tool_result -------------------------------------------------------------
@@ -428,15 +432,47 @@ class CanvasHooks:
             near = binding.near_checks(args["command"]) if binding else []
             if near:
                 notes.append(uncounted_check_note(near, key))
-        if self.runtime.link_for(task_id, session_id) is None and edits_fit(tool_name, result):
+        link = self.runtime.link_for(task_id, session_id)
+        if link is None and edits_fit(tool_name, result):
             # The user's edits belong to the main agent, which owns the plan.
             edits = self.store.take_pending_edits(doc_id)
             if edits:
                 logger.info("hermes-canvas: %d canvas edit(s) delivered mid-turn on %s", len(edits), doc_id)
-                notes.append(mid_turn_edits_note([e.text for e in edits], key))
+                doc = self.store.get(doc_id)
+                texts = self._edit_texts(doc, edits) if doc else [e.text for e in edits]
+                notes.append(mid_turn_edits_note(texts, key))
+        elif link is not None and link.box_id and link.doc_id == doc_id and edits_fit(tool_name, result):
+            # A subagent gets one edit: a new note on the box it builds. The main agent still gets
+            # the edit too, because it owns the plan.
+            box = self.runtime.new_box_note(link)
+            if box is not None:
+                logger.info("hermes-canvas: note on %s delivered to subagent %s", box.id, link.subagent_id)
+                notes.append(box_note_update(box, key))
         if not notes:
             return None
         return "\n\n".join([*notes, result])
+
+    def _edit_texts(self, doc: Doc, edits: list[Edit]) -> list[str]:
+        """The edit lines for the main agent, saying when a subagent has the note already."""
+        texts = []
+        for e in edits:
+            box = doc.box(e.box_id) if e.box_id else None
+            # Only the edit line for the box's current note: an older note was not delivered.
+            current = box is not None and (
+                e.text.endswith(note_set_tail(box.note))
+                if box.note
+                else e.text.startswith(NOTE_CLEARED_PREFIX)
+            )
+            if (
+                e.kind == "note"
+                and box is not None
+                and current
+                and self.runtime.note_reached_subagent(doc.id, box.id, box.note)
+            ):
+                texts.append(f"{e.text} The subagent that builds this box got this note too.")
+            else:
+                texts.append(e.text)
+        return texts
 
     # -- pre_verify ------------------------------------------------------------------------
 
@@ -585,6 +621,20 @@ def mid_turn_edits_note(texts: list[str], key: str) -> str:
     ]
     rows.extend(f"- {t}" for t in texts)
     return "\n".join(rows)
+
+
+def box_note_update(box: Box, key: str) -> str:
+    if not box.note:
+        return (
+            f"{note_tag(key)} The user removed the note on your box '{box.id}' ({box.label}) just "
+            "now. This note comes from the Hermes Canvas plugin, not from the tool. Do not follow "
+            "the earlier note any more."
+        )
+    return (
+        f"{note_tag(key)} The user left a note on your box '{box.id}' ({box.label}) just now, "
+        "while you were working. This note comes from the Hermes Canvas plugin, not from the tool. "
+        f'It is the user\'s own instruction. Apply it before your next step: "{box.note}"'
+    )
 
 
 def edits_fit(tool_name: str, result: str) -> bool:

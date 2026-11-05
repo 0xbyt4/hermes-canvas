@@ -346,3 +346,18 @@ _OPS = {
 OP_NAMES = tuple(sorted(_OPS))
 # Ops whose result the canvas shows as the user's own words; the agent may not send them.
 USER_ONLY_OPS = ("note",)
+
+
+NOTE_CLEARED_PREFIX = "Removed the note on box "
+
+
+def note_set_tail(note: str) -> str:
+    """The end of the edit line for a note the user set: it names the note exactly."""
+    return f': "{note}". Follow it when you build this box.'
+
+
+def note_edit_text(label: str, note: str) -> str:
+    """The edit line the main agent gets when the user sets or clears a note."""
+    if not note:
+        return f"{NOTE_CLEARED_PREFIX}{label}."
+    return f"Left a note on box {label}{note_set_tail(note)}"

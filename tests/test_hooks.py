@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from helpers import ROOT, SHOP_PLAN, SID, plan, start_api_subagent, terminal, write
 
+from canvas.api import CanvasApi
 from canvas.hooks import BLOCK_PREFIX, CanvasHooks
 from canvas.model import Doc, apply_op
 from canvas.runtime import CanvasRuntime
@@ -549,3 +550,102 @@ def test_a_removed_box_counts_writes_to_its_own_tests_instead_of_drift(
     refund = doc.require("refund")
     assert refund.removed and refund.writes == 1 and refund.written == ["tests/refund/page.test.ts"]
     assert not [b for b in doc.boxes if b.kind == "drift"]
+
+
+def _sub_result(hooks: CanvasHooks, task: str = "sa-0-aaaa1111", session: str = "c1") -> str | None:
+    return hooks.transform_tool_result(
+        tool_name="read_file", args={"path": "src/a.ts"}, result="file text", task_id=task, session_id=session
+    )
+
+
+def test_a_note_reaches_the_subagent_that_builds_the_box(hooks: CanvasHooks, doc_id: str) -> None:
+    api = CanvasApi(hooks.runtime)
+    start_api_subagent(hooks, doc_id)
+    hooks.subagent_start(
+        parent_session_id=SID, child_session_id="c2", child_subagent_id="sa-1-bbbb2222", child_goal="misc"
+    )
+    assert hooks.pre_llm_call(session_id="c1", task_id="sa-0-aaaa1111") is not None
+    assert _sub_result(hooks) is None
+
+    api.edit(doc_id, [{"op": "note", "id": "api", "text": "Use cents everywhere"}])
+    out = _sub_result(hooks)
+    assert out is not None and out.endswith("file text")
+    assert hooks.runtime.note_key(doc_id) in out and '"Use cents everywhere"' in out
+    assert _sub_result(hooks) is None  # once only
+    assert _sub_result(hooks, "sa-1-bbbb2222", "c2") is None  # not a subagent of that box
+
+    main = hooks.transform_tool_result(
+        tool_name="read_file", args={"path": "x"}, result="r", task_id=SID, session_id=SID
+    )
+    assert main is not None and "The subagent that builds this box got this note too." in main
+
+    api.edit(doc_id, [{"op": "note", "id": "api", "text": ""}])
+    cleared = _sub_result(hooks)
+    assert cleared is not None and "removed the note" in cleared
+
+
+def test_a_subagent_does_not_get_a_note_it_started_with_again(hooks: CanvasHooks, doc_id: str) -> None:
+    CanvasApi(hooks.runtime).edit(doc_id, [{"op": "note", "id": "api", "text": "Use cents everywhere"}])
+    start_api_subagent(hooks, doc_id)
+    ctx = hooks.pre_llm_call(session_id="c1", task_id="sa-0-aaaa1111")
+    assert ctx is not None and "Use cents everywhere" in ctx["context"]
+    assert _sub_result(hooks) is None
+    main = hooks.pre_llm_call(session_id=SID, task_id=SID)
+    assert main is not None and "got this note too" in main["context"]
+
+
+def test_a_note_does_not_reach_a_subagent_of_another_box(hooks: CanvasHooks, doc_id: str) -> None:
+    start_api_subagent(hooks, doc_id)
+    hooks.subagent_start(
+        parent_session_id=SID,
+        child_session_id="c2",
+        child_subagent_id="sa-1-bbbb2222",
+        child_goal=f"[canvas:{doc_id}/checkout] Checkout page.",
+    )
+    hooks.pre_llm_call(session_id="c2", task_id="sa-1-bbbb2222")
+    CanvasApi(hooks.runtime).edit(doc_id, [{"op": "note", "id": "api", "text": "Use cents everywhere"}])
+    assert _sub_result(hooks, "sa-1-bbbb2222", "c2") is None
+
+
+def test_only_the_delivered_note_gets_the_suffix(hooks: CanvasHooks, doc_id: str) -> None:
+    api = CanvasApi(hooks.runtime)
+    start_api_subagent(hooks, doc_id)
+    hooks.pre_llm_call(session_id="c1", task_id="sa-0-aaaa1111")
+    api.edit(doc_id, [{"op": "note", "id": "api", "text": 'Use "cents"'}])
+    api.edit(doc_id, [{"op": "note", "id": "api", "text": "cents"}])
+    out = _sub_result(hooks)
+    assert out is not None and '"cents"' in out and 'Use "cents"' not in out
+    main = hooks.pre_llm_call(session_id=SID, task_id=SID)
+    assert main is not None
+    lines = [line for line in main["context"].splitlines() if "Left a note" in line]
+    assert len(lines) == 2
+    assert "got this note too" not in lines[0] and "got this note too" in lines[1]
+
+
+def test_a_cleared_note_reaches_the_subagent_and_the_main_agent_knows(
+    hooks: CanvasHooks, doc_id: str
+) -> None:
+    api = CanvasApi(hooks.runtime)
+    api.edit(doc_id, [{"op": "note", "id": "api", "text": "Use cents everywhere"}])
+    hooks.pre_llm_call(session_id=SID, task_id=SID)  # the main agent takes the first edit
+    start_api_subagent(hooks, doc_id)
+    hooks.pre_llm_call(session_id="c1", task_id="sa-0-aaaa1111")
+    api.edit(doc_id, [{"op": "note", "id": "api", "text": ""}])
+    out = _sub_result(hooks)
+    assert out is not None and "removed the note" in out
+    main = hooks.pre_llm_call(session_id=SID, task_id=SID)
+    assert main is not None and "Removed the note on box" in main["context"]
+    assert "got this note too" in main["context"]
+
+
+def test_a_redraw_that_drops_a_note_is_not_reported_as_the_users_clear(
+    hooks: CanvasHooks, doc_id: str
+) -> None:
+    CanvasApi(hooks.runtime).edit(doc_id, [{"op": "note", "id": "api", "text": "Use cents everywhere"}])
+    start_api_subagent(hooks, doc_id)
+    hooks.pre_llm_call(session_id="c1", task_id="sa-0-aaaa1111")
+    without_api = [b for b in SHOP_PLAN if b["id"] != "api"]
+    hooks.store.draw(SID, "Shop", ROOT, plan(*[{**b, "after": []} for b in without_api]))
+    hooks.store.draw(SID, "Shop", ROOT, plan(*SHOP_PLAN))
+    assert hooks.store.get(doc_id).require("api").note == ""
+    assert _sub_result(hooks) is None
