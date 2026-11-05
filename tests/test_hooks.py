@@ -528,3 +528,24 @@ def test_a_session_in_the_root_counts_relative_writes_without_cd(hooks: CanvasHo
     os.utime(old, (1_000_000, 1_000_000))
     run_shell(hooks, "echo x > src/payments/api/old.ts")
     assert hooks.store.get(doc_id).require("api").writes == 1
+
+
+def test_a_removed_box_counts_writes_to_its_own_tests_instead_of_drift(
+    hooks: CanvasHooks, doc_id: str
+) -> None:
+    def setup(doc: Doc) -> str:
+        apply_op(doc, {"op": "set_check", "id": "refund", "check": "npx vitest run tests/refund"})
+        return apply_op(doc, {"op": "remove", "id": "refund"})
+
+    hooks.store.update(doc_id, setup, "user")
+    assert (
+        hooks.pre_tool_call(
+            tool_name="write_file", args={"path": "tests/refund/page.test.ts"}, task_id=SID, session_id=SID
+        )
+        is None
+    )
+    write(hooks, f"{ROOT}/tests/refund/page.test.ts")
+    doc = hooks.store.get(doc_id)
+    refund = doc.require("refund")
+    assert refund.removed and refund.writes == 1 and refund.written == ["tests/refund/page.test.ts"]
+    assert not [b for b in doc.boxes if b.kind == "drift"]

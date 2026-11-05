@@ -185,12 +185,13 @@ class CanvasHooks:
                     continue
                 box_ids = binding.boxes_for_path(rel)
                 if not box_ids:
-                    box_ids = [_drift_box(doc, rel).id]
+                    removed = binding.removed_box_for_write(rel)
+                    box_ids = [removed or _drift_box(doc, rel).id]
                 for box_id in box_ids:
                     box = doc.require(box_id)
                     # A box without a check cannot be verified again, so a finished one stays done.
                     keep_done = box.status == "done" and not box.check
-                    if box.kind != "drift" and box.status != "doing" and not keep_done:
+                    if box.kind != "drift" and not box.removed and box.status != "doing" and not keep_done:
                         box.status = "doing"
                     box.writes += 1
                     if rel in box.written:

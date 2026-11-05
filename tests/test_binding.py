@@ -266,3 +266,22 @@ def test_shell_write_paths(command: str, paths: list[str]) -> None:
 def test_code_paths_reads_path_literals() -> None:
     code = "open('src/a.ts', 'w'); Path(\"/repo/b/c.py\").write_text('hi'); x = 'plain'; y = 'v1.2'"
     assert code_paths(code) == ["src/a.ts", "/repo/b/c.py", "v1.2"]
+
+
+def test_a_removed_box_keeps_its_check_tests_for_writes_only() -> None:
+    doc = Doc(
+        id="cv-1",
+        session_id="s1",
+        title="t",
+        root="/repo",
+        boxes=plan(
+            {"id": "a", "label": "A", "files": ["src/a/**"], "check": "npx vitest run tests/shared"},
+            {"id": "b", "label": "B", "files": ["src/b/**"], "check": "npx vitest run tests/b tests/shared"},
+        ),
+    )
+    doc.require("b").removed = True
+    binding = Binding.build(doc)
+    assert binding.removed_box_for_write("tests/b/x.test.ts") == "b"
+    assert binding.removed_box_for_write("src/b/x.ts") == "b"
+    assert binding.removed_box_for_write("tests/shared/x.test.ts") is None
+    assert binding.removed_box_for_path("tests/b/x.test.ts") is None

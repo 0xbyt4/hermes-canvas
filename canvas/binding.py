@@ -253,22 +253,28 @@ class Binding:
     active: list[tuple[str, list[re.Pattern[str]]]] = field(default_factory=list)
     components: set[str] = field(default_factory=set)
     removed: list[tuple[str, list[re.Pattern[str]]]] = field(default_factory=list)
+    removed_tests: list[tuple[str, list[re.Pattern[str]]]] = field(default_factory=list)
     checks: list[tuple[str, str]] = field(default_factory=list)
 
     @classmethod
     def build(cls, doc: Doc) -> Binding:
         binding = cls(doc_id=doc.id, root=doc.root, revision=doc.revision)
         implied = owned_check_globs(doc)
+        claimed = {g for b in doc.active_boxes() if b.kind == "component" for g in check_globs(b.check)}
         for box in doc.boxes:
             extra = implied.get(box.id, [])
-            if not box.files and not extra:
-                continue
             if not box.removed and box.kind in ("component", "drift"):
+                if not box.files and not extra:
+                    continue
                 binding.active.append((box.id, [glob_to_regex(g) for g in [*box.files, *extra]]))
                 if box.kind == "component":
                     binding.components.add(box.id)
-            elif box.removed and box.kind == "component" and box.files:
-                binding.removed.append((box.id, [glob_to_regex(g) for g in box.files]))
+            elif box.removed and box.kind == "component":
+                if box.files:
+                    binding.removed.append((box.id, [glob_to_regex(g) for g in box.files]))
+                tests = [g for g in check_globs(box.check) if g not in claimed and g not in box.files]
+                if tests:
+                    binding.removed_tests.append((box.id, [glob_to_regex(g) for g in tests]))
         for box in doc.active_boxes():
             if box.check:
                 binding.checks.append((box.id, normalize_command(box.check)))
@@ -285,6 +291,19 @@ class Binding:
         if any(box_id in self.components for box_id in self.boxes_for_path(rel)):
             return None
         for box_id, pats in self.removed:
+            if any(p.match(rel) for p in pats):
+                return box_id
+        return None
+
+    def removed_box_for_write(self, rel: str) -> str | None:
+        """The removed component box a write to `rel` counts on, when no active box owns `rel`.
+
+        This covers the box's files and the test paths of its check that no active box claims.
+        It only counts writes: the veto uses `removed_box_for_path`, which checks `files` only.
+        """
+        if self.boxes_for_path(rel):
+            return None
+        for box_id, pats in [*self.removed, *self.removed_tests]:
             if any(p.match(rel) for p in pats):
                 return box_id
         return None
