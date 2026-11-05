@@ -326,6 +326,8 @@ const STYLE = `
 .hc-btn:disabled { opacity: .45; cursor: not-allowed; }
 .hc-btn.danger { color: var(--hc-fail); }
 .hc-input { font: inherit; font-family: var(--hc-hand); font-size: 15px; color: var(--hc-ink); background: var(--hc-paper); border: 1px solid var(--hc-accent); border-radius: 6px; padding: 2px 6px; flex: 1; min-width: 80px; }
+.hc-ask { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.hc-ask-q { font-family: var(--hc-hand); font-size: 14px; font-weight: 700; margin-right: 4px; }
 .hc-foot { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-top: 1px solid var(--hc-line); color: var(--hc-muted); font-size: 11px; flex-wrap: wrap; }
 .hc-foot .hc-src { font-style: italic; flex: 1; min-width: 0; }
 .hc-error { color: var(--hc-fail); }
@@ -394,10 +396,20 @@ function BoxLabel({ box, w, top, size, max }) {
   })
 }
 
+// Hermes names subagents `sa-<index>-<hex>`; show them as "subagent 1", "subagent 2"…
+function ownerName(owner) {
+  const m = /^sa-(\d+)-/.exec(owner || '')
+  return m ? `subagent ${Number(m[1]) + 1}` : owner
+}
+
+function clip(text, max) {
+  return text.length > max ? text.slice(0, max - 1) + '…' : text
+}
+
 function subLine(box) {
   if (box.removed) return 'removed from the plan'
   if (box.kind === 'drift') return 'written outside every box'
-  if (box.owner) return `${box.owner} · ${box.writes} write${box.writes === 1 ? '' : 's'}`
+  if (box.owner) return `${ownerName(box.owner)} · ${box.writes} write${box.writes === 1 ? '' : 's'}`
   if (box.writes) return `${box.writes} write${box.writes === 1 ? '' : 's'}`
   if (box.check) return box.check
   return (box.files || []).join(', ')
@@ -450,7 +462,7 @@ function BoxEl({ box, pos, selected, onPointerDown, onDoubleClick, onAnswer }) {
   } else {
     children.push(jsx(BoxLabel, { box, w, top: 34, size: 17, max: 18 }, 'label'))
     children.push(
-      jsx('text', { x: w / 2, y: h - 10, textAnchor: 'middle', className: 'hc-sub', children: subLine(box).slice(0, 34) }, 'sub')
+      jsx('text', { x: w / 2, y: h - 10, textAnchor: 'middle', className: 'hc-sub', children: clip(subLine(box), 28) }, 'sub')
     )
   }
   children.push(jsx(Badge, { box, w }, 'badge'))
@@ -472,9 +484,30 @@ function BoxEl({ box, pos, selected, onPointerDown, onDoubleClick, onAnswer }) {
   })
 }
 
+/* ---------- answering a question ---------- */
+
+// Is the agent of this chat in a turn? busyBySession is keyed by runtime ids; a card only knows
+// the stored id, which matches when its chat is the focused one.
+function sessionBusy(ids) {
+  const map = host.state.busyBySession.get() || {}
+  if (ids.some(id => map[id])) return true
+  const focused = [host.state.focusedStoredSessionId.get(), host.state.focusedSessionId.get()]
+  return ids.some(id => id && focused.includes(id)) && Boolean(host.state.busy.get())
+}
+
+// After an answer, send the turn for the user when the agent is idle, so the build goes on.
+// A busy agent gets the answer on its next tool result instead (transform_tool_result).
+function continueTurn(ids, box, option) {
+  if (!ids.length || sessionBusy(ids)) return
+  const text = `${box.label} → ${option}. Continue with the plan on the canvas.`
+  if (!host.composer.submit(ids[0], text)) {
+    host.notify && host.notify({ kind: 'info', message: 'Answer saved. Send a message to continue the build.' })
+  }
+}
+
 /* ---------- detail strip for the selected box ---------- */
 
-function Detail({ box, renaming, busy, onRename, onCancelRename, onStartRename, onRemove, onRestore }) {
+function Detail({ box, renaming, busy, onRename, onCancelRename, onStartRename, onRemove, onRestore, onAdopt }) {
   const [draft, setDraft] = useState(box.label)
   const inputRef = useRef(null)
   // A poll can change the label while the user types: keep the draft until renaming ends.
@@ -489,7 +522,7 @@ function Detail({ box, renaming, busy, onRename, onCancelRename, onStartRename, 
   }, [renaming])
   const state = boxState(box)
   const rows = []
-  if (box.owner) rows.push(['Built by', jsx('span', { className: 'hc-mono', children: box.owner })])
+  if (box.owner) rows.push(['Built by', jsx('span', { children: `${ownerName(box.owner)} (${box.owner})` })])
   if (box.files && box.files.length) rows.push(['Files', jsx('span', { className: 'hc-mono', children: box.files.join('  ') })])
   if (box.check) rows.push(['Check', jsx('span', { className: 'hc-mono', children: box.check })])
   if (box.written && box.written.length) {
@@ -529,6 +562,16 @@ function Detail({ box, renaming, busy, onRename, onCancelRename, onStartRename, 
           jsx('span', { className: `hc-chip ${state}`, children: STATUS_TEXT[state] || state }),
           box.kind !== 'drift'
             ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onStartRename, children: 'Rename' })
+            : null,
+          box.kind === 'drift' && !box.removed
+            ? jsx('button', {
+                type: 'button',
+                className: 'hc-btn',
+                disabled: busy,
+                onClick: onAdopt,
+                title: 'Keep this file as part of the plan',
+                children: 'Add to plan'
+              })
             : null,
           box.removed
             ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onRestore, children: 'Restore' })
@@ -757,7 +800,11 @@ function CanvasPane() {
     }
     if (await send([{ op: 'rename', id: selBox.id, label: clean }])) setRenaming(false)
   }
-  const answer = (box, option) => send([{ op: 'answer', id: box.id, answer: option }])
+  const adopt = () => selBox && send([{ op: 'adopt', id: selBox.id }])
+  const answer = async (box, option) => {
+    if (box.answer === option) return
+    if (await send([{ op: 'answer', id: box.id, answer: option }])) continueTurn(session.ids, box, option)
+  }
 
   const onKeyDown = e => {
     if (!selBox || renaming || busy) return
@@ -893,7 +940,8 @@ function CanvasPane() {
             onCancelRename: () => setRenaming(false),
             onStartRename: () => setRenaming(true),
             onRemove: remove,
-            onRestore: restore
+            onRestore: restore,
+            onAdopt: adopt
           })
         : null,
       jsxs('div', {
@@ -912,11 +960,12 @@ function CanvasPane() {
 
 /* ---------- the chat card ---------- */
 
-function CanvasCard({ attrs }) {
+function CanvasCard({ attrs, sessionId }) {
   const id = attrs && typeof attrs.id === 'string' ? attrs.id : ''
   const valid = CANVAS_ID_RE.test(id)
   const [doc, setDoc] = useState(null)
   const [error, setError] = useState('')
+  const [sending, setSending] = useState(false)
   const load = useCallback(async () => {
     if (!valid) return
     try {
@@ -933,6 +982,20 @@ function CanvasCard({ attrs }) {
   useCanvasEvents(event => {
     if (event && event.payload && event.payload.canvas_id === id) load()
   })
+  const answer = async (box, option) => {
+    if (sending || box.answer === option) return
+    setSending(true)
+    try {
+      const res = await rest('/edit', { method: 'POST', body: { canvas_id: id, ops: [{ op: 'answer', id: box.id, answer: option }] } })
+      setDoc(res.canvas || null)
+      setError('')
+      continueTurn(sessionId ? [sessionId] : [], box, option)
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setSending(false)
+    }
+  }
   if (!valid) return null
   if (!doc) {
     return jsxs('div', {
@@ -943,6 +1006,7 @@ function CanvasCard({ attrs }) {
   const progress = progressOf(doc)
   const pct = progress.total ? Math.round((progress.done / progress.total) * 100) : 0
   const parts = doc.boxes.filter(b => b.kind !== 'drift')
+  const open = doc.boxes.filter(b => b.kind === 'question' && !b.removed && !b.answer && b.options.length)
   return jsxs('div', {
     className: 'hc-root hc-card',
     children: [
@@ -962,6 +1026,22 @@ function CanvasCard({ attrs }) {
           return jsx('span', { className: `hc-chip ${state}`, title: STATUS_TEXT[state] || state, children: b.label }, b.id)
         })
       }),
+      ...open.map(q =>
+        jsxs(
+          'div',
+          {
+            className: 'hc-ask',
+            children: [
+              jsx('span', { className: 'hc-ask-q', children: q.label }),
+              ...q.options.map(opt =>
+                jsx('button', { type: 'button', className: 'hc-btn', disabled: sending, onClick: () => answer(q, opt), children: opt }, opt)
+              )
+            ]
+          },
+          q.id
+        )
+      ),
+      error ? jsx('span', { className: 'hc-error', children: error }) : null,
       jsx('span', { className: 'hc-meta', children: 'Open the Canvas pane to steer the plan.' })
     ]
   })

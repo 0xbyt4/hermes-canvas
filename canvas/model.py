@@ -289,6 +289,25 @@ def _op_answer(doc: Doc, op: dict[str, Any]) -> str:
     return f"answered {box.id}: {answer}"
 
 
+def _op_adopt(doc: Doc, op: dict[str, Any]) -> str:
+    """Make a drift box (a file written outside every box) a planned box that owns that file.
+
+    The file is already written and a drift box has no check, so the box is done; `set_check`
+    can add a check later.
+    """
+    box = doc.require(_box_id(op.get("id")))
+    if box.kind != "drift":
+        raise CanvasError(f"box {box.id!r} is not a drift box")
+    if box.removed:
+        raise CanvasError(f"box {box.id!r} was removed; restore it first")
+    label = op.get("label")
+    if label is not None:
+        box.label = _text(label, "label", limit=200, required=True)
+    box.kind = "component"
+    box.status = "done"
+    return f"added drift file {', '.join(box.files)} to the plan as {box.id}"
+
+
 def _op_move(doc: Doc, op: dict[str, Any]) -> str:
     box = doc.require(_box_id(op.get("id")))
     for axis in ("x", "y"):
@@ -313,5 +332,6 @@ _OPS = {
     "set_status": _op_set_status,
     "answer": _op_answer,
     "move": _op_move,
+    "adopt": _op_adopt,
 }
 OP_NAMES = tuple(sorted(_OPS))

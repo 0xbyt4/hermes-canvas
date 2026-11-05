@@ -77,7 +77,8 @@ UPDATE_SCHEMA: dict[str, Any] = {
         "add {box}, remove {id}, restore {id}, rename {id, label}, set_files {id, files}, "
         "set_check {id, check}, set_after {id, after}, "
         "set_status {id, status} (only when no write or check can show it), "
-        "answer {id, answer}, move {id, x, y}."
+        "answer {id, answer}, move {id, x, y}, "
+        "adopt {id, label?} (make a drift box a planned box that owns its file)."
     ),
     "parameters": {
         "type": "object",

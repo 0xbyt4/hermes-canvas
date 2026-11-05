@@ -18,7 +18,7 @@ from .store import EditSpec
 logger = logging.getLogger(__name__)
 
 # Ops the pane may send. Plan-shaping ops (add, set_files, set_check, set_after) stay with the agent.
-USER_OPS = ("remove", "restore", "rename", "move", "answer")
+USER_OPS = ("remove", "restore", "rename", "move", "answer", "adopt")
 MAX_OPS = 20
 EVENT_CHANGED = "changed"
 
@@ -149,6 +149,12 @@ def edit_note(op: dict[str, Any], before: Box | None, after: Box | None) -> str 
     if name == "rename" and before.label != after.label:
         return (
             f"Renamed box '{after.id}' from '{before.label}' to '{after.label}'. Use the new name and intent."
+        )
+    if name == "adopt" and before.kind == "drift":
+        files = ", ".join(after.files)
+        return (
+            f"Added {files}, which you wrote outside the plan, to the plan as box '{after.id}' "
+            f"({after.label}). Keep it as part of the work."
         )
     if name == "answer" and before.answer != after.answer:
         return f"Answered the question {label}: {after.answer}. Build with this choice."

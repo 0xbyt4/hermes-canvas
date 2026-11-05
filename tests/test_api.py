@@ -194,3 +194,44 @@ def test_edit_note_is_saved_with_the_revision(api: CanvasApi, doc_id: str) -> No
     edits = api.store.pending_edits(doc_id)
     assert [e.kind for e in edits] == ["remove"]
     assert edits[0].created_at == api.store.get(doc_id).updated_at
+
+
+def test_user_adopts_a_drift_file_into_the_plan(api: CanvasApi, doc_id: str) -> None:
+    hooks = CanvasHooks(api.runtime)
+    hooks.post_tool_call(
+        tool_name="write_file",
+        args={"path": "/repo/src/money.ts", "content": "x"},
+        result='{"bytes_written": 1}',
+        task_id=SID,
+        session_id=SID,
+        status="ok",
+    )
+    out = api.edit(doc_id, [{"op": "adopt", "id": "drift-1", "label": "Money helpers"}])
+    box = next(b for b in out["canvas"]["boxes"] if b["id"] == "drift-1")
+    assert (box["kind"], box["status"], box["label"], box["files"]) == (
+        "component",
+        "done",
+        "Money helpers",
+        ["src/money.ts"],
+    )
+    assert api.store.pending_edits(doc_id)[-1].text.startswith(
+        "Added src/money.ts, which you wrote outside the plan, to the plan as box 'drift-1' (Money helpers)."
+    )
+    # The file now belongs to the box: the next write is not drift any more.
+    hooks.post_tool_call(
+        tool_name="write_file",
+        args={"path": "/repo/src/money.ts", "content": "y"},
+        result='{"bytes_written": 1}',
+        task_id=SID,
+        session_id=SID,
+        status="ok",
+    )
+    boxes = api.store.get(doc_id).boxes
+    assert [b.id for b in boxes if b.kind == "drift"] == []
+    adopted = next(b for b in boxes if b.id == "drift-1")
+    assert (adopted.writes, adopted.status) == (2, "done")  # no check: a finished box stays done
+
+
+def test_only_drift_boxes_can_be_adopted(api: CanvasApi, doc_id: str) -> None:
+    with pytest.raises(CanvasError, match="not a drift box"):
+        api.edit(doc_id, [{"op": "adopt", "id": "api"}])
