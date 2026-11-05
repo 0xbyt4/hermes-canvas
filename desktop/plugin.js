@@ -119,6 +119,19 @@ function tickPath(id, w) {
   return `M${f1(x + j())} ${f1(16 + j())} Q${f1(x + 5)} ${f1(24)} ${f1(x + 8 + j())} ${f1(27 + j())} Q${f1(x + 14)} ${f1(14)} ${f1(x + 24 + j())} ${f1(4 + j())}`
 }
 
+// Diagonal sketch lines inside a box, for work in progress.
+function hatchPath(id, w, h, step = 10, pad = 5) {
+  const r = mulberry(hash(id + 'hatch'))
+  let d = ''
+  for (let k = -h; k < w; k += step) {
+    const lo = Math.max(pad, k + h - (w - pad))
+    const hi = Math.min(h - pad, k + h - pad)
+    if (hi - lo < 6) continue
+    d += sline(r, k + h - lo, lo, k + h - hi, hi, 0.8)
+  }
+  return d
+}
+
 function wrapText(text, max, lines = 2) {
   const out = []
   let cur = ''
@@ -204,6 +217,58 @@ function stickyView(prev, next) {
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
+const CAMERA_MS = 650
+const FOCUS_MS = 2600
+
+// A view centered on one box, with the fit view's aspect, or null when zooming would not help.
+function focusView(fit, p) {
+  if (!p) return null
+  const w = Math.max(BOX.w * 3.2, fit.w * 0.55)
+  if (w >= fit.w * 0.92) return null
+  const h = (w * fit.h) / fit.w
+  return { x: p.x + p.w / 2 - w / 2, y: p.y + p.h / 2 - h / 2, w, h }
+}
+
+const easeInOut = t => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
+
+function mixView(a, b, t) {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, w: a.w + (b.w - a.w) * t, h: a.h + (b.h - a.h) * t }
+}
+
+function sameView(a, b) {
+  return Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 && Math.abs(a.w - b.w) < 0.5 && Math.abs(a.h - b.h) < 0.5
+}
+
+const reducedMotion = () =>
+  typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+// Eases the shown view toward `target`. Returns the view to draw.
+function useCamera(target) {
+  const [cam, setCam] = useState(target)
+  const camRef = useRef(target)
+  useEffect(() => {
+    const from = camRef.current
+    if (sameView(from, target)) return
+    if (reducedMotion()) {
+      camRef.current = target
+      setCam(target)
+      return
+    }
+    let raf = 0
+    const start = performance.now()
+    const tick = now => {
+      const t = Math.min(1, (now - start) / CAMERA_MS)
+      const v = mixView(from, target, easeInOut(t))
+      camRef.current = v
+      setCam(v)
+      if (t < 1) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [target.x, target.y, target.w, target.h])
+  return cam
+}
+
 function bounds(placed) {
   let x0 = Infinity
   let y0 = Infinity
@@ -241,6 +306,40 @@ function lastLine(text) {
     .map(s => s.trim())
     .filter(Boolean)
   return lines.length ? lines[lines.length - 1] : ''
+}
+
+// The line of a failing check that says what failed: an error line first, then a FAIL line,
+// else the last line (test runners often end with a timing summary).
+function failLine(text) {
+  const lines = String(text || '')
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean)
+  return (
+    lines.find(l => /^[\w.]*(Error|Exception)\b:?/.test(l) || /^E\s{2,}/.test(l)) ||
+    lines.find(l => /\b(FAIL|FAILED)\b|^[×✗]/.test(l)) ||
+    lastLine(text)
+  )
+}
+
+function revealPane() {
+  if (typeof host.revealPane === 'function') host.revealPane(PANE_ID)
+}
+
+// One short line on where the build stands, for the card and the pane header.
+function statusLine(doc) {
+  const parts = doc.boxes.filter(b => b.kind === 'component' && !b.removed)
+  const failed = parts.filter(b => b.status === 'failed').length
+  const doing = parts.filter(b => b.status === 'doing').length
+  const open = doc.boxes.filter(b => b.kind === 'question' && !b.removed && !b.answer).length
+  const drift = doc.boxes.filter(b => b.kind === 'drift' && !b.removed).length
+  if (parts.length && parts.every(b => b.status === 'done')) return { text: 'Shipped: every box passed its check', tone: 'done' }
+  const out = []
+  if (open) out.push(`${open} question${open === 1 ? '' : 's'} to answer`)
+  if (failed) out.push(`${failed} failing`)
+  if (doing) out.push(`${doing} in progress`)
+  if (drift) out.push(`${drift} file${drift === 1 ? '' : 's'} outside the plan`)
+  return { text: out.join(' · ') || 'Planned', tone: failed ? 'failed' : open ? 'ask' : '' }
 }
 
 function progressOf(doc) {
@@ -326,6 +425,17 @@ const STYLE = `
 .hc-btn:disabled { opacity: .45; cursor: not-allowed; }
 .hc-btn.danger { color: var(--hc-fail); }
 .hc-input { font: inherit; font-family: var(--hc-hand); font-size: 15px; color: var(--hc-ink); background: var(--hc-paper); border: 1px solid var(--hc-accent); border-radius: 6px; padding: 2px 6px; flex: 1; min-width: 80px; }
+.hc-diff { margin: 0; border-radius: 6px; background: var(--ui-bg-tertiary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.45; max-height: 220px; overflow: auto; padding: 4px 0; }
+.hc-diff div { white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 8px; }
+.hc-diff .add { color: var(--hc-done); background: color-mix(in srgb, var(--hc-done) 10%, transparent); }
+.hc-diff .del { color: var(--hc-fail); background: color-mix(in srgb, var(--hc-fail) 10%, transparent); }
+.hc-diff .hunk { color: var(--hc-muted); }
+.hc-file { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.hc-notetag rect { fill: color-mix(in srgb, var(--hc-note) 70%, var(--hc-paper)); stroke: color-mix(in srgb, var(--hc-note) 60%, var(--hc-ink)); stroke-width: 1; }
+.hc-notetag text { font-family: var(--hc-hand); font-size: 11px; font-weight: 700; fill: var(--hc-ink); }
+.hc-note-text { font-family: var(--hc-hand); font-size: 14px; padding: 4px 8px; border-radius: 6px; background: color-mix(in srgb, var(--hc-note) 22%, transparent); overflow-wrap: anywhere; }
+.hc-textarea { font: inherit; font-family: var(--hc-hand); font-size: 14px; color: var(--hc-ink); background: var(--hc-paper); border: 1px solid var(--hc-accent); border-radius: 6px; padding: 4px 6px; width: 100%; box-sizing: border-box; resize: vertical; min-height: 48px; }
+.hc-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .hc-ask { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .hc-ask-q { font-family: var(--hc-hand); font-size: 14px; font-weight: 700; margin-right: 4px; }
 .hc-foot { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-top: 1px solid var(--hc-line); color: var(--hc-muted); font-size: 11px; flex-wrap: wrap; }
@@ -335,9 +445,28 @@ const STYLE = `
 .hc-card-head { display: flex; align-items: center; gap: 8px; }
 .hc-bar { height: 5px; border-radius: 999px; background: var(--ui-bg-tertiary); overflow: hidden; }
 .hc-bar i { display: block; height: 100%; background: var(--hc-done); }
+.hc-status { font-size: 11.5px; color: var(--hc-muted); }
+.hc-status.done { color: var(--hc-done); font-weight: 600; }
+.hc-status.failed { color: var(--hc-fail); font-weight: 600; }
+.hc-status.ask { color: color-mix(in srgb, var(--hc-note) 70%, var(--hc-ink)); font-weight: 600; }
 .hc-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.hc-hatch { fill: none; stroke: var(--hc-doing); stroke-width: 1.3; stroke-linecap: round; opacity: .32; stroke-dasharray: 7 4; animation: hc-hatch 1.4s linear infinite; }
+.hc-comet circle { fill: var(--hc-done); }
+.hc-pop { transform-box: fill-box; transform-origin: center; animation: hc-pop .5s ease-out; }
+.hc-follow.on { color: var(--hc-accent); border-color: var(--hc-accent); }
+.hc-finale { position: absolute; inset: 0; pointer-events: none; overflow: hidden; display: grid; place-items: center; }
+.hc-finale i { position: absolute; top: -12px; width: 7px; height: 11px; border-radius: 1px; opacity: 0; animation-name: hc-fall; animation-timing-function: cubic-bezier(.3,.6,.5,1); animation-fill-mode: forwards; }
+.hc-finale b { font-family: var(--hc-hand); font-size: 44px; color: var(--hc-done); transform: rotate(-6deg); text-shadow: 0 2px 0 var(--hc-paper); animation: hc-stamp .6s cubic-bezier(.2,1.6,.4,1) both; }
+.hc-history { border-top: 1px solid var(--hc-line); padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
+.hc-range { flex: 1; min-width: 80px; accent-color: var(--hc-accent); }
+.hc-past { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); font-size: 11px; padding: 2px 10px; border-radius: 999px; background: var(--hc-accent); color: var(--hc-paper); pointer-events: none; }
+.hc-head .hc-btn { padding: 2px 7px; font-size: 11px; }
+@keyframes hc-fall { 0% { opacity: 1; transform: translate(0, 0) rotate(0); } 100% { opacity: 0; transform: translate(var(--hc-drift), 105%) translateY(420px) rotate(var(--hc-rot)); } }
+@keyframes hc-stamp { 0% { opacity: 0; transform: rotate(-6deg) scale(2.2); } 100% { opacity: 1; transform: rotate(-6deg) scale(1); } }
 @keyframes hc-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .hc-ring { animation: none; } }
+@keyframes hc-hatch { to { stroke-dashoffset: -22; } }
+@keyframes hc-pop { 0% { transform: scale(1); } 35% { transform: scale(1.07); } 100% { transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .hc-ring, .hc-hatch, .hc-pop { animation: none; } .hc-comet, .hc-finale i { display: none; } .hc-finale b { animation: none; } }
 `
 
 function Style() {
@@ -346,11 +475,48 @@ function Style() {
 
 /* ---------- board pieces ---------- */
 
-function Edge({ from, to, ok }) {
+function edgeGeometry(from, to) {
   const a = edgePoint(from, to)
   const b = edgePoint(to, from)
   const r = mulberry(hash(`${from.id}>${to.id}`))
-  const d = sline(r, a.x, a.y, b.x, b.y, 1.2)
+  return { a, b, d: sline(r, a.x, a.y, b.x, b.y, 1.2) }
+}
+
+// A short light that runs along an edge when the box it starts from is done.
+const COMET_MS = 900
+const COMET_TRAIL = [0, 0.06, 0.12]
+
+function Comet({ d }) {
+  const pathRef = useRef(null)
+  const [t, setT] = useState(0)
+  useEffect(() => {
+    let raf = 0
+    const begin = performance.now()
+    const tick = now => {
+      const v = Math.min(1, (now - begin) / COMET_MS)
+      setT(v)
+      if (v < 1) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+  const path = pathRef.current
+  const len = path ? path.getTotalLength() : 0
+  const dots = len
+    ? COMET_TRAIL.map((lag, i) => {
+        const at = easeInOut(Math.max(0, t - lag) / (1 - lag)) * len
+        const pt = path.getPointAtLength(at)
+        return jsx('circle', { cx: pt.x, cy: pt.y, r: 4.6 - i * 1.4, opacity: (1 - i * 0.32) * (t < 1 ? 1 : 0) }, i)
+      })
+    : []
+  return jsxs('g', {
+    className: 'hc-comet',
+    children: [jsx('path', { ref: pathRef, d, fill: 'none', stroke: 'none' }), ...dots]
+  })
+}
+
+function Edge({ from, to, ok }) {
+  const { b, d, a } = edgeGeometry(from, to)
   const ang = Math.atan2(b.y - a.y, b.x - a.x)
   const head = [
     [b.x, b.y],
@@ -415,12 +581,15 @@ function subLine(box) {
   return (box.files || []).join(', ')
 }
 
-function BoxEl({ box, pos, selected, onPointerDown, onDoubleClick, onAnswer }) {
+function BoxEl({ box, pos, selected, popped, onPointerDown, onDoubleClick, onAnswer }) {
   const { w, h } = pos
   const state = boxState(box)
   const cls = ['hc-el', `hc-${state}`, box.kind === 'question' ? 'hc-question' : '', box.kind === 'drift' ? 'hc-drift' : '']
   const children = [
     jsx('rect', { className: 'hc-fill', x: 2, y: 2, width: w - 4, height: h - 4, rx: 6 }, 'fill'),
+    box.status === 'doing' && !box.removed && box.kind === 'component'
+      ? jsx('path', { className: 'hc-hatch', d: hatchPath(box.id, w, h) }, 'hatch')
+      : null,
     jsx('path', { className: 'hc-ink', d: srect(hash(box.id), 0, 0, w, h) }, 'ink')
   ]
   if (box.kind === 'question') {
@@ -466,10 +635,24 @@ function BoxEl({ box, pos, selected, onPointerDown, onDoubleClick, onAnswer }) {
     )
   }
   children.push(jsx(Badge, { box, w }, 'badge'))
+  if (box.note && !box.removed) {
+    children.push(
+      jsxs(
+        'g',
+        {
+          className: 'hc-notetag',
+          transform: 'translate(-8 -11) rotate(-4)',
+          children: [jsx('rect', { width: 40, height: 17, rx: 2 }), jsx('text', { x: 20, y: 12.5, textAnchor: 'middle', children: 'note' })]
+        },
+        'note'
+      )
+    )
+  }
   if (box.removed) children.push(jsx('path', { className: 'hc-strike', d: scribble(box.id, w, h) }, 'strike'))
   if (box.status === 'failed' && !box.removed && box.kind === 'component') {
-    const err = lastLine(box.check_output) || `exit ${box.check_exit}`
-    children.push(jsx('text', { x: 2, y: h + 16, className: 'hc-err', children: '✗ ' + err.slice(0, 40) }, 'err'))
+    const err = failLine(box.check_output) || `exit ${box.check_exit}`
+    const short = err.length > 32 ? err.slice(0, 31) + '…' : err
+    children.push(jsx('text', { x: 2, y: h + 16, className: 'hc-err', children: '✗ ' + short }, 'err'))
   }
   if (selected) {
     children.push(jsx('rect', { className: 'hc-sel', x: -6, y: -6, width: w + 12, height: h + 12, rx: 8 }, 'sel'))
@@ -480,7 +663,8 @@ function BoxEl({ box, pos, selected, onPointerDown, onDoubleClick, onAnswer }) {
     onPointerDown: e => onPointerDown(e, box),
     onDoubleClick: () => onDoubleClick(box),
     'data-box': box.id,
-    children
+    // A CSS transform on this group would replace its translate, so the pop runs on an inner group.
+    children: jsx('g', { className: popped ? 'hc-pop' : undefined, children }, popped || 'still')
   })
 }
 
@@ -507,7 +691,166 @@ function continueTurn(ids, box, option) {
 
 /* ---------- detail strip for the selected box ---------- */
 
-function Detail({ box, renaming, busy, onRename, onCancelRename, onStartRename, onRemove, onRestore, onAdopt }) {
+const DIFF_STATUS = {
+  modified: 'changed',
+  added: 'new file',
+  unchanged: 'no change since the last commit',
+  missing: 'deleted or not found',
+  outside: 'outside the project: not shown',
+  binary: 'binary file: not shown',
+  too_large: 'too large to show',
+  error: 'no diff'
+}
+
+function diffLineClass(line) {
+  if (line.startsWith('@@')) return 'hunk'
+  if (line.startsWith('+')) return 'add'
+  if (line.startsWith('-')) return 'del'
+  return ''
+}
+
+function DiffBody({ text }) {
+  // Skip git's file header (everything before the first hunk): the file name is shown above.
+  const all = text.split('\n')
+  const first = all.findIndex(l => l.startsWith('@@'))
+  const lines = first < 0 ? all : all.slice(first)
+  if (lines.length && lines[lines.length - 1] === '') lines.pop()
+  return jsx('div', {
+    className: 'hc-diff',
+    children: lines.map((line, i) => jsx('div', { className: diffLineClass(line), children: line || ' ' }, i))
+  })
+}
+
+// Loads the git diff of the files the box wrote. Reloads when the box gets a new write.
+function Changes({ canvasId, box }) {
+  const [open, setOpen] = useState(false)
+  const [state, setState] = useState({ key: '', files: null, error: '' })
+  const key = `${canvasId}|${box.id}|${box.writes}`
+  useEffect(() => {
+    if (!open || state.key === key) return
+    let alive = true
+    rest(`/diff?id=${encodeURIComponent(canvasId)}&box=${encodeURIComponent(box.id)}`)
+      .then(res => alive && setState({ key, files: res.files || [], error: '' }))
+      .catch(err => alive && setState({ key, files: null, error: errorText(err) }))
+    return () => {
+      alive = false
+    }
+  }, [open, key, canvasId, box.id, state.key])
+  useEffect(() => {
+    setOpen(false)
+  }, [box.id])
+  if (!box.written || !box.written.length) return null
+  const loading = open && state.key !== key
+  return jsxs('div', {
+    children: [
+      jsxs('div', {
+        className: 'hc-file',
+        children: [
+          jsx('div', { className: 'hc-k', style: { flex: 1 }, children: 'Changes' }),
+          jsx('button', {
+            type: 'button',
+            className: 'hc-btn',
+            onClick: () => setOpen(v => !v),
+            children: open ? 'Hide diff' : 'Show diff'
+          })
+        ]
+      }),
+      open && loading ? jsx('span', { className: 'hc-meta', children: 'Loading diff…' }) : null,
+      open && state.error ? jsx('span', { className: 'hc-error', children: state.error }) : null,
+      ...(open && !loading && state.files
+        ? state.files.map(f =>
+            jsxs(
+              'div',
+              {
+                children: [
+                  jsxs('div', {
+                    className: 'hc-file',
+                    children: [
+                      jsx('span', { className: 'hc-mono', style: { flex: 1 }, children: f.path }),
+                      jsx('span', { className: 'hc-chip', children: DIFF_STATUS[f.status] || f.status })
+                    ]
+                  }),
+                  f.diff && (f.status === 'modified' || f.status === 'added' || f.status === 'missing')
+                    ? jsx(DiffBody, { text: f.diff })
+                    : f.status === 'error' && f.diff
+                      ? jsx('span', { className: 'hc-meta', children: f.diff })
+                      : null,
+                  f.truncated ? jsx('span', { className: 'hc-meta', children: 'Diff cut at 20,000 characters.' }) : null
+                ]
+              },
+              f.path
+            )
+          )
+        : [])
+    ]
+  })
+}
+
+function NoteEditor({ box, busy, onSave }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(box.note || '')
+  useEffect(() => {
+    setEditing(false)
+  }, [box.id])
+  useEffect(() => {
+    if (!editing) setDraft(box.note || '')
+  }, [box.note, editing])
+  if (box.removed || box.kind === 'drift') {
+    return box.note ? jsx('div', { className: 'hc-note-text', children: box.note }) : null
+  }
+  if (!editing) {
+    return jsxs('div', {
+      className: 'hc-row',
+      children: [
+        box.note ? jsx('div', { className: 'hc-note-text', style: { flex: 1 }, children: box.note }) : null,
+        jsx('button', {
+          type: 'button',
+          className: 'hc-btn',
+          disabled: busy,
+          onClick: () => setEditing(true),
+          children: box.note ? 'Edit note' : 'Add note for the agent'
+        })
+      ]
+    })
+  }
+  const save = async text => {
+    if (await onSave(text)) setEditing(false)
+  }
+  return jsxs('form', {
+    onSubmit: e => {
+      e.preventDefault()
+      save(draft.trim())
+    },
+    children: [
+      jsx('textarea', {
+        className: 'hc-textarea',
+        value: draft,
+        maxLength: 500,
+        autoFocus: true,
+        placeholder: 'For example: use the brand colors here',
+        'aria-label': 'Note for the agent',
+        onChange: e => setDraft(e.target.value),
+        onKeyDown: e => {
+          if (e.key === 'Escape') setEditing(false)
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault()
+            save(draft.trim())
+          }
+        }
+      }),
+      jsxs('div', {
+        className: 'hc-row',
+        children: [
+          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || draft.trim() === (box.note || ''), children: 'Save note' }),
+          box.note ? jsx('button', { type: 'button', className: 'hc-btn danger', disabled: busy, onClick: () => save(''), children: 'Clear' }) : null,
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: () => setEditing(false), children: 'Cancel' })
+        ]
+      })
+    ]
+  })
+}
+
+function Detail({ canvasId, box, renaming, busy, onRename, onCancelRename, onStartRename, onRemove, onRestore, onAdopt, onNote }) {
   const [draft, setDraft] = useState(box.label)
   const inputRef = useRef(null)
   // A poll can change the label while the user types: keep the draft until renaming ends.
@@ -585,6 +928,7 @@ function Detail({ box, renaming, busy, onRename, onCancelRename, onStartRename, 
     className: 'hc-detail',
     children: [
       head,
+      jsx(NoteEditor, { box, busy, onSave: onNote }),
       ...rows.map(([k, v]) =>
         jsxs('div', { children: [jsx('div', { className: 'hc-k', children: k }), v] }, k)
       ),
@@ -592,12 +936,210 @@ function Detail({ box, renaming, busy, onRename, onCancelRename, onStartRename, 
         ? jsxs('div', {
             children: [jsx('div', { className: 'hc-k', children: `Check output (exit ${box.check_exit})` }), output]
           })
+        : null,
+      jsx(Changes, { canvasId, box })
+    ]
+  })
+}
+
+/* ---------- export ---------- */
+
+const MERMAID_CLASS = { todo: 'todo', doing: 'doing', done: 'done', failed: 'failed', removed: 'removed', drift: 'drift' }
+
+function mermaidText(doc) {
+  const ids = new Map(doc.boxes.map((b, i) => [b.id, `n${i}`]))
+  const esc = text => String(text).replace(/"/g, '#quot;').replace(/[\r\n]+/g, ' ')
+  const lines = ['flowchart TD', `  %% ${esc(doc.title)} (revision ${doc.revision})`]
+  for (const b of doc.boxes) {
+    const state = boxState(b)
+    const text = b.kind === 'question' && b.answer ? `${b.label}: ${b.answer}` : b.label
+    const shape = b.kind === 'question' ? [`{"`, `"}`] : [`["`, `"]`]
+    lines.push(`  ${ids.get(b.id)}${shape[0]}${esc(text)}${shape[1]}:::${MERMAID_CLASS[state] || 'todo'}`)
+  }
+  for (const b of doc.boxes) {
+    for (const a of b.after || []) if (ids.has(a)) lines.push(`  ${ids.get(a)} --> ${ids.get(b.id)}`)
+  }
+  lines.push(
+    '  classDef todo fill:#f4f4f5,stroke:#71717a',
+    '  classDef doing fill:#dbeafe,stroke:#2563eb',
+    '  classDef done fill:#dcfce7,stroke:#16a34a',
+    '  classDef failed fill:#fee2e2,stroke:#dc2626',
+    '  classDef removed fill:#fafafa,stroke:#a1a1aa,stroke-dasharray:4 3,color:#a1a1aa',
+    '  classDef drift fill:#fff,stroke:#71717a,stroke-dasharray:6 4'
+  )
+  return lines.join('\n') + '\n'
+}
+
+async function copyMermaid(doc) {
+  const text = mermaidText(doc)
+  try {
+    await navigator.clipboard.writeText(text)
+    host.notify && host.notify({ kind: 'success', message: 'Canvas copied as a Mermaid flowchart.' })
+  } catch (err) {
+    console.error('[hermes-canvas] clipboard write failed', err)
+    host.notify && host.notify({ kind: 'error', message: 'Could not copy the Mermaid text to the clipboard.' })
+  }
+}
+
+/* ---------- finale ---------- */
+
+const FINALE_MS = 3600
+
+function Finale() {
+  const r = mulberry(7)
+  const colors = ['var(--hc-done)', 'var(--hc-doing)', 'var(--hc-note)', 'var(--hc-accent)', 'var(--hc-fail)']
+  const bits = Array.from({ length: 46 }, (_, i) => ({
+    left: `${(r() * 100).toFixed(1)}%`,
+    delay: `${(r() * 0.6).toFixed(2)}s`,
+    dur: `${(1.6 + r() * 1.2).toFixed(2)}s`,
+    rot: `${Math.round(r() * 720 - 360)}deg`,
+    drift: `${Math.round(r() * 80 - 40)}px`,
+    color: colors[i % colors.length]
+  }))
+  return jsxs('div', {
+    className: 'hc-finale',
+    'aria-live': 'polite',
+    children: [
+      ...bits.map((b, i) =>
+        jsx(
+          'i',
+          {
+            style: {
+              left: b.left,
+              background: b.color,
+              animationDelay: b.delay,
+              animationDuration: b.dur,
+              '--hc-rot': b.rot,
+              '--hc-drift': b.drift
+            }
+          },
+          i
+        )
+      ),
+      jsx('b', { children: 'Shipped' })
+    ]
+  })
+}
+
+/* ---------- history ---------- */
+
+function HistoryBar({ list, n, latest, playing, onPick, onPlay, onClose }) {
+  const item = list.find(h => h.revision === n)
+  const when = item ? new Date(item.at * 1000).toLocaleTimeString() : ''
+  return jsxs('div', {
+    className: 'hc-history',
+    children: [
+      jsxs('div', {
+        className: 'hc-row',
+        children: [
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onPlay, children: playing ? 'Pause' : 'Play' }),
+          jsx('input', {
+            type: 'range',
+            className: 'hc-range',
+            min: 1,
+            max: latest,
+            step: 1,
+            value: n,
+            'aria-label': 'Revision',
+            onChange: e => onPick(Number(e.target.value))
+          }),
+          jsx('span', { className: 'hc-meta', children: `rev ${n}/${latest}` }),
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onClose, children: 'Live' })
+        ]
+      }),
+      item
+        ? jsx('span', {
+            className: 'hc-meta',
+            children: `${item.author === 'user' ? 'You' : item.author === 'agent' ? 'Agent' : 'Hooks'} · ${when} · ${item.reason}`
+          })
         : null
     ]
   })
 }
 
+/* ---------- adding a box ---------- */
+
+function slugId(label, boxes) {
+  const base =
+    label
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'box'
+  const taken = new Set(boxes.map(b => b.id))
+  let id = base
+  for (let n = 2; taken.has(id); n++) id = `${base}-${n}`
+  return id
+}
+
+function AddBox({ after, busy, onAdd, onCancel }) {
+  const [label, setLabel] = useState('')
+  return jsxs('form', {
+    className: 'hc-detail',
+    onSubmit: e => {
+      e.preventDefault()
+      if (label.trim()) onAdd(label.trim())
+    },
+    children: [
+      jsx('div', { className: 'hc-k', children: after ? `New box after "${after.label}"` : 'New box' }),
+      jsxs('div', {
+        className: 'hc-row',
+        children: [
+          jsx('input', {
+            className: 'hc-input',
+            value: label,
+            maxLength: 200,
+            autoFocus: true,
+            placeholder: 'What should be built?',
+            'aria-label': 'New box name',
+            onChange: e => setLabel(e.target.value),
+            onKeyDown: e => {
+              if (e.key === 'Escape') onCancel()
+            }
+          }),
+          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || !label.trim(), children: 'Add' }),
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onCancel, children: 'Cancel' })
+        ]
+      }),
+      jsx('span', { className: 'hc-meta', children: 'The agent picks its files and check, then builds it.' })
+    ]
+  })
+}
+
 /* ---------- the pane ---------- */
+
+const FOLLOW_KEY = 'hermes-canvas.follow'
+
+function readFollow() {
+  try {
+    return window.localStorage.getItem(FOLLOW_KEY) !== 'off'
+  } catch (err) {
+    console.warn('[hermes-canvas] could not read the Follow setting', err)
+    return true
+  }
+}
+
+function saveFollow(on) {
+  try {
+    window.localStorage.setItem(FOLLOW_KEY, on ? 'on' : 'off')
+  } catch (err) {
+    console.warn('[hermes-canvas] could not save the Follow setting', err)
+  }
+}
+
+// What changed between two revisions of the same canvas: boxes with a new status or new writes,
+// and the boxes that just became done.
+function diffBoxes(prev, boxes) {
+  const changed = []
+  const done = []
+  for (const b of boxes) {
+    const old = prev.get(b.id)
+    if (!old) continue
+    if (old.status !== b.status || old.writes !== b.writes || old.removed !== b.removed) changed.push(b)
+    if (old.status !== 'done' && b.status === 'done' && !b.removed) done.push(b)
+  }
+  return { changed, done }
+}
 
 function useSessionId() {
   const stored = useValue(host.state.focusedStoredSessionId)
@@ -615,6 +1157,9 @@ function CanvasPane() {
   const [live, setLive] = useState(false)
   const [selected, setSelected] = useState(null)
   const [renaming, setRenaming] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const [hist, setHist] = useState(null) // { list, n, doc, playing } while viewing past revisions
+  const [finale, setFinale] = useState(false)
   const [busy, setBusy] = useState(false)
   // The drag lives in a ref: pointer events can arrive before React re-renders, so handlers must
   // not read it from a render's closure. The state copy only redraws the dragged box.
@@ -671,6 +1216,10 @@ function CanvasPane() {
     setDoc(null)
     setSelected(null)
     setRenaming(false)
+    setAdding(false)
+    setHist(null)
+    setFinale(false)
+    revSeq.current++
     setLoaded(false)
     load()
   }, [sid, load])
@@ -722,7 +1271,9 @@ function CanvasPane() {
     return () => ro.disconnect()
   }, [doc ? doc.id : null])
 
-  const boxes = doc ? doc.boxes : []
+  const shown = (hist && hist.doc) || doc
+  const past = Boolean(hist)
+  const boxes = shown ? shown.boxes : []
   const placed = useMemo(() => layout(boxes, vertical), [boxes, vertical])
   const viewRef = useRef(null) // { key, view }
   const view = useMemo(() => {
@@ -733,6 +1284,111 @@ function CanvasPane() {
     viewRef.current = { key, view: next }
     return next
   }, [placed, doc ? doc.id : null, vertical])
+  // Motion: a box that changes gets a pop, a box that gets done sends a comet to the boxes after
+  // it, and the camera (with Follow on) moves to the box that changed, then back to the whole plan.
+  const [follow, setFollow] = useState(readFollow)
+  const [hover, setHover] = useState(false)
+  const [focus, setFocus] = useState(null) // box id
+  const [comets, setComets] = useState([]) // { key, d }
+  const [pops, setPops] = useState({}) // box id -> stamp
+  const seenRef = useRef(null) // { id, boxes: Map }
+  const timersRef = useRef(new Set())
+  const later = (fn, ms) => {
+    const t = setTimeout(() => {
+      timersRef.current.delete(t)
+      fn()
+    }, ms)
+    timersRef.current.add(t)
+  }
+  useEffect(() => () => timersRef.current.forEach(clearTimeout), [])
+  // Entering or leaving the replay jumps between revisions: that jump is not a change to animate.
+  useEffect(() => {
+    seenRef.current = null
+  }, [past])
+  useEffect(() => {
+    if (!shown) return
+    const seen = seenRef.current
+    const now = new Map(shown.boxes.map(b => [b.id, { status: b.status, writes: b.writes, removed: b.removed }]))
+    seenRef.current = { id: shown.id, boxes: now }
+    if (!seen || seen.id !== shown.id) return
+    const { changed, done } = diffBoxes(seen.boxes, shown.boxes)
+    if (!changed.length) return
+    const stamp = Date.now()
+    setPops(cur => {
+      const next = { ...cur }
+      changed.forEach(b => (next[b.id] = stamp))
+      return next
+    })
+    later(() => setPops(cur => Object.fromEntries(Object.entries(cur).filter(([, v]) => v !== stamp))), 600)
+    const fresh = []
+    for (const src of done) {
+      for (const dst of shown.boxes) {
+        if (dst.removed || !(dst.after || []).includes(src.id)) continue
+        const a = placed.get(src.id)
+        const b = placed.get(dst.id)
+        if (a && b) fresh.push({ key: `${src.id}>${dst.id}@${stamp}`, d: edgeGeometry({ ...a, id: src.id }, { ...b, id: dst.id }).d })
+      }
+    }
+    if (fresh.length) {
+      setComets(cur => [...cur, ...fresh])
+      const keys = new Set(fresh.map(c => c.key))
+      later(() => setComets(cur => cur.filter(c => !keys.has(c.key))), COMET_MS + 150)
+    }
+    const target = [...changed].reverse().find(b => b.kind === 'component' || b.kind === 'drift')
+    if (target && !hover) {
+      setFocus(target.id)
+      later(() => setFocus(cur => (cur === target.id ? null : cur)), FOCUS_MS)
+    }
+    // Finale: the live plan just became all done.
+    if (!past && statusLine(shown).tone === 'done' && done.length) {
+      setFinale(true)
+      later(() => setFinale(false), FINALE_MS)
+    }
+  }, [shown])
+
+  // History: scrub or play the saved revisions. The live canvas keeps updating underneath.
+  // Only the newest request may change the replay: a slow older response must not land last.
+  const revSeq = useRef(0)
+  const showRevision = useCallback(async n => {
+    const current = docRef.current
+    if (!current) return
+    const seq = ++revSeq.current
+    try {
+      const res = await rest(`/revision?id=${encodeURIComponent(current.id)}&n=${n}`)
+      if (seq !== revSeq.current || !docRef.current || docRef.current.id !== current.id) return
+      setHist(h => (h ? { ...h, n, doc: res.canvas } : h))
+    } catch (err) {
+      if (seq !== revSeq.current) return
+      setError(errorText(err))
+      setHist(h => h && { ...h, playing: false })
+    }
+  }, [])
+  const openHistory = async () => {
+    const current = docRef.current
+    if (!current) return
+    try {
+      const res = await rest(`/history?id=${encodeURIComponent(current.id)}`)
+      setSelected(null)
+      setAdding(false)
+      setRenaming(false)
+      setHist({ list: res.revisions || [], n: current.revision, doc: current, playing: false })
+    } catch (err) {
+      setError(errorText(err))
+    }
+  }
+  useEffect(() => {
+    if (!hist || !hist.playing) return
+    const latest = Math.max(docRef.current ? docRef.current.revision : 1, hist.list.length ? hist.list[hist.list.length - 1].revision : 1)
+    if (hist.n >= latest) {
+      setHist(h => h && { ...h, playing: false })
+      return
+    }
+    const t = setTimeout(() => showRevision(hist.n + 1), 750)
+    return () => clearTimeout(t)
+  }, [hist, showRevision])
+  const target = (follow && !hover && focus && focusView(view, placed.get(focus))) || view
+  const cam = useCamera(target)
+
   const posOf = id => {
     const p = placed.get(id)
     if (!p) return null
@@ -751,7 +1407,7 @@ function CanvasPane() {
   }
 
   const onBoxPointerDown = (e, box) => {
-    if (e.button !== 0) return
+    if (e.button !== 0 || past) return
     e.stopPropagation()
     const p = toBoard(e)
     // Select on release, not here: the detail strip resizes the board, which must not happen
@@ -801,12 +1457,23 @@ function CanvasPane() {
     if (await send([{ op: 'rename', id: selBox.id, label: clean }])) setRenaming(false)
   }
   const adopt = () => selBox && send([{ op: 'adopt', id: selBox.id }])
+  const note = text => (selBox ? send([{ op: 'note', id: selBox.id, text }]) : Promise.resolve(false))
+  const addAfter = selBox && selBox.kind === 'component' && !selBox.removed ? selBox : null
+  const addBox = async label => {
+    const id = slugId(label, doc.boxes)
+    const box = { id, label, after: addAfter ? [addAfter.id] : [] }
+    if (await send([{ op: 'add', box }])) {
+      setAdding(false)
+      setSelected(id)
+    }
+  }
   const answer = async (box, option) => {
-    if (box.answer === option) return
+    if (past || box.answer === option) return
     if (await send([{ op: 'answer', id: box.id, answer: option }])) continueTurn(session.ids, box, option)
   }
 
   const onKeyDown = e => {
+    if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return
     if (!selBox || renaming || busy) return
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault()
@@ -850,13 +1517,14 @@ function CanvasPane() {
     })
   }
 
-  const progress = progressOf(doc)
+  const progress = progressOf(shown)
+  const latestRev = hist && hist.list.length ? Math.max(doc.revision, hist.list[hist.list.length - 1].revision) : doc.revision
   const edges = []
-  for (const box of doc.boxes) {
+  for (const box of shown.boxes) {
     for (const dep of box.after || []) {
       const a = posOf(dep)
       const b = posOf(box.id)
-      const src = doc.boxes.find(x => x.id === dep)
+      const src = shown.boxes.find(x => x.id === dep)
       if (a && b && src) {
         edges.push(jsx(Edge, { from: { ...a, id: dep }, to: { ...b, id: box.id }, ok: src.status === 'done' }, `${dep}>${box.id}`))
       }
@@ -874,16 +1542,61 @@ function CanvasPane() {
         children: [
           jsx('span', { className: `hc-live${live ? '' : ' off'}`, title: live ? 'Live updates' : 'Polling for updates' }),
           jsx('span', { className: 'hc-title', title: doc.title, children: doc.title }),
-          jsx('span', { className: 'hc-meta', children: `${progress.done}/${progress.total} done · rev ${doc.revision}` })
+          jsx('span', { className: 'hc-meta', children: `${progress.done}/${progress.total} done · rev ${shown.revision}` }),
+          jsx('button', {
+            type: 'button',
+            className: `hc-btn${past ? ' on hc-follow' : ''}`,
+            title: 'Replay how the plan changed',
+            onClick: () => (past ? setHist(null) : openHistory()),
+            children: 'History'
+          }),
+          jsx('button', {
+            type: 'button',
+            className: 'hc-btn',
+            title: 'Copy the canvas as a Mermaid flowchart',
+            onClick: () => copyMermaid(shown),
+            children: 'Mermaid'
+          }),
+          jsx('button', {
+            type: 'button',
+            className: `hc-btn hc-follow${follow ? ' on' : ''}`,
+            'aria-pressed': follow,
+            title: 'Move the view to the box that changes',
+            onClick: () => {
+              saveFollow(!follow)
+              setFollow(!follow)
+              setFocus(null)
+            },
+            children: 'Follow'
+          }),
+          jsx('button', {
+            type: 'button',
+            className: 'hc-btn',
+            disabled: busy || past,
+            title: 'Add a box to the plan',
+            onClick: () => {
+              setAdding(true)
+              setRenaming(false)
+            },
+            children: '+ Box'
+          })
         ]
       }),
       jsxs('div', {
         className: 'hc-board',
         ref: boardRef,
+        // The camera holds still under the pointer, so a box never moves away from a click.
+        onPointerEnter: () => {
+          setHover(true)
+          setFocus(null)
+        },
+        onPointerLeave: () => {
+          if (!dragRef.current) setHover(false)
+        },
         children: [
           jsxs('svg', {
             ref: svgRef,
-            viewBox: `${f1(view.x)} ${f1(view.y)} ${f1(view.w)} ${f1(view.h)}`,
+            viewBox: `${f1(cam.x)} ${f1(cam.y)} ${f1(cam.w)} ${f1(cam.h)}`,
             preserveAspectRatio: 'xMidYMid meet',
             role: 'img',
             'aria-label': `Canvas: ${doc.title}`,
@@ -906,8 +1619,9 @@ function CanvasPane() {
               }),
               jsx('rect', { x: view.x - 2000, y: view.y - 2000, width: view.w + 4000, height: view.h + 4000, fill: 'url(#hc-dots)' }),
               jsx('g', { children: edges }),
+              jsx('g', { children: comets.map(c => jsx(Comet, { d: c.d }, c.key)) }),
               jsx('g', {
-                children: doc.boxes.map(box => {
+                children: shown.boxes.map(box => {
                   const pos = posOf(box.id)
                   if (!pos) return null
                   return jsx(
@@ -916,8 +1630,10 @@ function CanvasPane() {
                       box,
                       pos,
                       selected: box.id === selected,
+                      popped: pops[box.id] || 0,
                       onPointerDown: onBoxPointerDown,
                       onDoubleClick: b => {
+                        if (past) return
                         setSelected(b.id)
                         if (b.kind !== 'drift') setRenaming(true)
                       },
@@ -928,11 +1644,35 @@ function CanvasPane() {
                 })
               })
             ]
-          })
+          }),
+          past ? jsx('span', { className: 'hc-past', children: `Replay · revision ${shown.revision}` }) : null,
+          finale && !past ? jsx(Finale, {}) : null
         ]
       }),
-      selBox
+      hist
+        ? jsx(HistoryBar, {
+            list: hist.list,
+            n: hist.n,
+            latest: latestRev,
+            playing: hist.playing,
+            onPick: n => {
+              setHist(h => h && { ...h, playing: false })
+              showRevision(n)
+            },
+            onPlay: () => {
+              if (hist.playing) return setHist(h => h && { ...h, playing: false })
+              // Play from the start when the slider is at the end.
+              const restart = hist.n >= latestRev
+              setHist(h => h && { ...h, n: restart ? 1 : h.n, playing: true })
+              if (restart) showRevision(1)
+            },
+            onClose: () => setHist(null)
+          })
+        : adding
+        ? jsx(AddBox, { after: addAfter, busy, onAdd: addBox, onCancel: () => setAdding(false) })
+        : selBox
         ? jsx(Detail, {
+            canvasId: doc.id,
             box: selBox,
             renaming,
             busy,
@@ -941,7 +1681,8 @@ function CanvasPane() {
             onStartRename: () => setRenaming(true),
             onRemove: remove,
             onRestore: restore,
-            onAdopt: adopt
+            onAdopt: adopt,
+            onNote: note
           })
         : null,
       jsxs('div', {
@@ -1007,6 +1748,7 @@ function CanvasCard({ attrs, sessionId }) {
   const pct = progress.total ? Math.round((progress.done / progress.total) * 100) : 0
   const parts = doc.boxes.filter(b => b.kind !== 'drift')
   const open = doc.boxes.filter(b => b.kind === 'question' && !b.removed && !b.answer && b.options.length)
+  const status = statusLine(doc)
   return jsxs('div', {
     className: 'hc-root hc-card',
     children: [
@@ -1019,6 +1761,7 @@ function CanvasCard({ attrs, sessionId }) {
         ]
       }),
       jsx('div', { className: 'hc-bar', children: jsx('i', { style: { width: `${pct}%` } }) }),
+      jsx('span', { className: `hc-status ${status.tone}`, children: status.text }),
       jsx('div', {
         className: 'hc-chips',
         children: parts.map(b => {
@@ -1042,7 +1785,15 @@ function CanvasCard({ attrs, sessionId }) {
         )
       ),
       error ? jsx('span', { className: 'hc-error', children: error }) : null,
-      jsx('span', { className: 'hc-meta', children: 'Open the Canvas pane to steer the plan.' })
+      jsxs('div', {
+        className: 'hc-row',
+        children: [
+          typeof host.revealPane === 'function'
+            ? jsx('button', { type: 'button', className: 'hc-btn', onClick: revealPane, children: 'Open canvas' })
+            : null,
+          jsx('span', { className: 'hc-meta', children: 'Steer the plan on the canvas: edits reach the agent at once.' })
+        ]
+      })
     ]
   })
 }
