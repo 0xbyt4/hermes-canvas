@@ -13,7 +13,8 @@ Add payments to the shop. Plan it on the canvas first:
 - Receipt email in src/receipt/**, check `npx vitest run tests/receipt.test.ts`, after the API.
   tests/receipt.test.ts comes from the shop owner: do not edit it.
 Do not call any network service: the provider client is a small fake inside src/payments.
-Format every price with formatMoney from src/money.ts.
+Format every price with formatMoney from src/money.ts. Change files outside the boxes only when a
+check fails because of them; then fix them and say so.
 Put the canvas card line in your reply and stop until I answer the question.
 When I answer, build the Payment API yourself, then delegate the other boxes with delegate_task,
 using the goals from canvas_next. Run each box's check command exactly as written.
