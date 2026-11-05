@@ -19,6 +19,11 @@ MAX_LIST = 50
 MAX_COORD = 100_000
 MAX_NOTE = 500  # board units; the pane draws boxes about 200 wide
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+# Who did the real work the hooks saw: the main agent, or a subagent by its Hermes id (`sa-…`).
+MAIN_ACTOR = "main"
+ACTIVITY_KINDS = ("start", "write", "check", "veto", "stop", "gate")
+MAX_ACTIVITY = 24
+MAX_ACTIVITY_DETAIL = 160
 
 
 class CanvasError(ValueError):
@@ -112,6 +117,25 @@ class Box:
 
 
 @dataclass
+class Activity:
+    """One piece of real work a hook saw. The pane shows each actor at its latest activity."""
+
+    actor: str
+    kind: str
+    boxes: list[str] = field(default_factory=list)
+    detail: str = ""
+    revision: int = 0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Activity:
+        known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(**known)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class Doc:
     id: str
     session_id: str
@@ -121,6 +145,7 @@ class Doc:
     revision: int = 0
     created_at: float = 0.0
     updated_at: float = 0.0
+    activity: list[Activity] = field(default_factory=list)
 
     def box(self, box_id: str) -> Box | None:
         for box in self.boxes:
@@ -137,6 +162,16 @@ class Doc:
     def active_boxes(self) -> list[Box]:
         return [b for b in self.boxes if not b.removed]
 
+    def record(self, actor: str, kind: str, boxes: list[str], detail: str = "") -> None:
+        """Log real work for the pane. Call it from a store `mutate`: the store saves the next
+        revision, so the entry gets that revision number."""
+        if kind not in ACTIVITY_KINDS:
+            raise ValueError(f"unknown activity kind {kind!r}")
+        entry = Activity(actor or MAIN_ACTOR, kind, list(dict.fromkeys(boxes)), detail[:MAX_ACTIVITY_DETAIL])
+        entry.revision = self.revision + 1
+        self.activity.append(entry)
+        del self.activity[:-MAX_ACTIVITY]
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -147,6 +182,7 @@ class Doc:
             "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "activity": [a.to_dict() for a in self.activity],
         }
 
     @classmethod
@@ -160,6 +196,7 @@ class Doc:
             revision=int(data.get("revision", 0)),
             created_at=float(data.get("created_at", 0.0)),
             updated_at=float(data.get("updated_at", 0.0)),
+            activity=[Activity.from_dict(a) for a in data.get("activity", [])],
         )
 
 

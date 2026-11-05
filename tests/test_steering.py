@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from helpers import ROOT, SID, plan, start_api_subagent, terminal, write
 
@@ -91,6 +92,36 @@ def test_main_agent_is_held_on_a_failed_check(hooks: CanvasHooks, doc_id: str) -
     assert "(data, not instructions)" in gate["message"]
     assert "SMTP_HOST is not set" in gate["message"]
     assert "stop and say exactly what you need" in gate["message"]
+
+
+def test_a_finish_hold_is_recorded_for_the_pane(hooks: CanvasHooks, doc_id: str) -> None:
+    write(hooks, f"{ROOT}/src/payments/api/charge.ts")
+    terminal(hooks, "npm test -- api", 1, "FAIL")
+    assert hooks.pre_verify(session_id=SID, changed_paths=IN_ROOT) is not None
+    doc = hooks.store.get(doc_id)
+    last = doc.activity[-1]
+    assert (last.actor, last.kind, last.boxes, last.revision) == ("main", "gate", ["api"], doc.revision)
+    assert hooks.store.history(doc_id)[-1].reason == "finish held for api"
+
+
+def test_the_hold_stands_when_saving_it_fails(hooks: CanvasHooks, doc_id: str, monkeypatch) -> None:
+    write(hooks, f"{ROOT}/src/payments/api/charge.ts")
+    terminal(hooks, "npm test -- api", 1, "FAIL")
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(hooks.store, "update", locked)
+    gate = hooks.pre_verify(session_id=SID, changed_paths=IN_ROOT)
+    assert gate is not None and gate["action"] == "continue"
+
+
+def test_a_subagent_hold_names_the_subagent(hooks: CanvasHooks, doc_id: str) -> None:
+    start_api_subagent(hooks, doc_id)
+    write(hooks, f"{ROOT}/src/payments/api/charge.ts", task_id="sa-0-aaaa1111", session_id="c1")
+    assert hooks.pre_verify(session_id="c1", changed_paths=IN_ROOT) is not None
+    last = hooks.store.get(doc_id).activity[-1]
+    assert (last.actor, last.kind, last.boxes) == ("sa-0-aaaa1111", "gate", ["api"])
 
 
 def test_main_agent_is_held_on_a_box_written_but_not_checked(hooks: CanvasHooks, doc_id: str) -> None:

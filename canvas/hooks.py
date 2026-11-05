@@ -22,7 +22,7 @@ import time
 from typing import Any
 
 from .binding import WRITE_TOOLS, Binding, check_test_paths, paths_from_args, paths_from_result, relativize
-from .model import MAX_WRITTEN, NOTE_CLEARED_PREFIX, Box, Doc, note_set_tail
+from .model import MAIN_ACTOR, MAX_WRITTEN, NOTE_CLEARED_PREFIX, Box, Doc, note_set_tail
 from .runtime import CanvasRuntime
 from .shell import code_paths, shell_scan
 from .store import Edit
@@ -37,6 +37,7 @@ CONTEXT_HEADER = "[hermes-canvas]"
 MAX_DRIFT_IN_CONTEXT = 5
 SUBAGENT_SUCCESS = ("completed", "ok", "success")
 GATE_OUTPUT_LIMIT = 300
+MAX_DETAIL_FILES = 2  # file names in a write activity; the rest is a count
 # Hermes wraps these results as untrusted data (agent/tool_dispatch_helpers.py), so a user edit
 # placed in them would read as data. Edits wait for another tool result or the next turn.
 UNTRUSTED_TOOLS = ("web_search", "web_extract")
@@ -131,6 +132,7 @@ class CanvasHooks:
         if tool_name not in (*WRITE_TOOLS, "terminal", "execute_code"):
             return
         doc_id = self.runtime.doc_id_for(task_id, session_id)
+        actor = self._actor(task_id, session_id)
         start = self._start_cwd(task_id, session_id)
         started = None
         if tool_name == "terminal":
@@ -143,7 +145,7 @@ class CanvasHooks:
         if tool_name == "execute_code":
             # A script's writes are invisible here; only a veto of it is recorded.
             if status == "blocked" and BLOCK_PREFIX in (error_message or ""):
-                self._record_block(doc_id, tool_name, args)
+                self._record_block(doc_id, tool_name, args, actor)
             return
         if tool_name == "terminal":
             # Hermes reports status "error" for every non-zero exit, so a failing check arrives as
@@ -151,7 +153,7 @@ class CanvasHooks:
             # the other not-run cases apart (see _record_check).
             if status == "blocked":
                 if BLOCK_PREFIX in (error_message or ""):
-                    self._record_block(doc_id, tool_name, args, "" if start is None else start)
+                    self._record_block(doc_id, tool_name, args, actor, "" if start is None else start)
                 return
             # Files written by the shell count like write_file, before the check in the same command.
             # A failing command may still have written its files (`cat > f` truncates f first).
@@ -159,27 +161,34 @@ class CanvasHooks:
                 paths = self._fresh_root_paths(doc_id, args, started)
             if paths and _command_ran(result):
                 owner = self.runtime.owner_box(task_id, session_id)
-                self._record_writes(doc_id, paths, owner[1] if owner else "", task_id)
-            self._record_check(doc_id, args, result)
+                self._record_writes(doc_id, paths, owner[1] if owner else "", task_id, actor)
+            self._record_check(doc_id, args, result, actor)
             return
         if status == "blocked":
             if BLOCK_PREFIX in (error_message or ""):
-                self._record_block(doc_id, tool_name, args)
+                self._record_block(doc_id, tool_name, args, actor)
             return
         parsed = _parse_json(result)
         if status not in ("", "ok") or (parsed and parsed.get("error")):
             return
         paths = paths_from_result(parsed) or paths_from_args(tool_name, args)
         owner = self.runtime.owner_box(task_id, session_id)
-        self._record_writes(doc_id, paths, owner[1] if owner else "", task_id)
+        self._record_writes(doc_id, paths, owner[1] if owner else "", task_id, actor)
 
-    def _record_writes(self, doc_id: str, paths: list[str], owner_box: str, task_id: str) -> None:
+    def _actor(self, task_id: str, session_id: str) -> str:
+        """The agent that made a call: a subagent by its id, else the main agent."""
+        link = self.runtime.link_for(task_id, session_id)
+        return link.subagent_id if link is not None and link.subagent_id else MAIN_ACTOR
+
+    def _record_writes(self, doc_id: str, paths: list[str], owner_box: str, task_id: str, actor: str) -> None:
         if not paths:
             return
 
         def mutate(doc: Doc) -> str | None:
             binding = Binding.build(doc)
             touched: list[str] = []
+            boxes: list[str] = []
+            files: list[str] = []
             for path in paths:
                 rel = relativize(path, doc.root)
                 if rel is None:
@@ -202,11 +211,18 @@ class CanvasHooks:
                     if owner_box == box_id and task_id.startswith("sa-"):
                         box.owner = task_id
                     touched.append(f"{box_id}:{rel}")
-            return f"write {', '.join(touched)}" if touched else None
+                    boxes.append(box_id)
+                    if rel not in files:
+                        files.append(rel)
+            if not touched:
+                return None
+            more = f" +{len(files) - MAX_DETAIL_FILES}" if len(files) > MAX_DETAIL_FILES else ""
+            doc.record(actor, "write", boxes, ", ".join(files[:MAX_DETAIL_FILES]) + more)
+            return f"write {', '.join(touched)}"
 
         self.store.update(doc_id, mutate, "hooks")
 
-    def _record_check(self, doc_id: str, args: Any, result: Any) -> None:
+    def _record_check(self, doc_id: str, args: Any, result: Any, actor: str) -> None:
         command = args.get("command") if isinstance(args, dict) else None
         if not isinstance(command, str) or not command:
             return
@@ -236,11 +252,14 @@ class CanvasHooks:
                 box.check_exit = exit_code
                 box.check_output = output[-CHECK_OUTPUT_LIMIT:]
                 changed.append(box_id)
-            return f"check {','.join(changed)} exit {exit_code}" if changed else None
+            if not changed:
+                return None
+            doc.record(actor, "check", changed, f"exit {exit_code}")
+            return f"check {','.join(changed)} exit {exit_code}"
 
         self.store.update(doc_id, mutate, "hooks")
 
-    def _record_block(self, doc_id: str, tool_name: str, args: Any, cwd: str | None = "") -> None:
+    def _record_block(self, doc_id: str, tool_name: str, args: Any, actor: str, cwd: str | None = "") -> None:
         paths = written_paths(tool_name, args, cwd)
 
         def mutate(doc: Doc) -> str | None:
@@ -250,6 +269,7 @@ class CanvasHooks:
                 box_id = binding.removed_box_for_path(rel) if rel else None
                 if box_id is not None:
                     doc.require(box_id).blocked += 1
+                    doc.record(actor, "veto", [box_id], rel)
                     return f"veto {box_id}:{rel}"
             return None
 
@@ -333,6 +353,7 @@ class CanvasHooks:
                 box.owner = link.subagent_id
                 if box.status in ("todo", "failed"):
                     box.status = "doing"
+                doc.record(link.subagent_id, "start", [box.id])
                 return f"subagent {link.subagent_id} started {box.id}"
 
             self.store.update(link.doc_id, mutate, "hooks")
@@ -342,13 +363,17 @@ class CanvasHooks:
     def subagent_stop(self, child_session_id: str | None = None, child_status: str = "", **_: Any) -> None:
         try:
             link = self.runtime.finish_subagent(child_session_id or "", child_status or "")
-            if link is None or not (link.doc_id and link.box_id):
+            if link is None or not link.doc_id:
                 return
 
             def mutate(doc: Doc) -> str | None:
-                box = doc.box(link.box_id)
+                box = doc.box(link.box_id) if link.box_id else None
+                if box is None and not any(a.actor == link.subagent_id for a in doc.activity):
+                    return None  # nothing of it is on the canvas
+                # The pane takes the subagent off the canvas, even when its box does not change.
+                doc.record(link.subagent_id, "stop", [box.id] if box else [], link.finished)
                 if box is None or box.owner != link.subagent_id or box.status != "doing":
-                    return None
+                    return f"subagent {link.subagent_id} ended ({link.finished})"
                 if not box.check and link.finished in SUBAGENT_SUCCESS:
                     # No check to wait for: the child's own success is the only signal.
                     box.status = "done"
@@ -502,15 +527,28 @@ class CanvasHooks:
         link = self.runtime.link_for("", session_id)
         if link is not None:
             box = doc.box(link.box_id) if link.box_id else None
-            problems = [p for p in [box_problem(box)] if p] if box is not None and not box.removed else []
+            held = [box] if box is not None and box_problem(box) else []
         elif any(isinstance(p, str) and relativize(p, doc.root) is not None for p in changed_paths):
-            problems = main_agent_problems(doc)
+            held = main_agent_held_boxes(doc)
         else:
-            problems = []
-        if not problems:
+            held = []
+        if not held:
             return None
-        logger.info("hermes-canvas: pre_verify holds %s on %s: %d box(es)", session_id, doc.id, len(problems))
-        return {"action": "continue", "message": gate_message(doc, problems)}
+        logger.info("hermes-canvas: pre_verify holds %s on %s: %d box(es)", session_id, doc.id, len(held))
+        actor = link.subagent_id if link is not None and link.subagent_id else MAIN_ACTOR
+        held_ids = [b.id for b in held]
+
+        def mutate(fresh: Doc) -> str:
+            fresh.record(actor, "gate", held_ids)
+            return f"finish held for {', '.join(held_ids)}"
+
+        hold = {"action": "continue", "message": gate_message(doc, [box_problem(b) or "" for b in held])}
+        # The pane shows the hold. The hold itself must not depend on that save.
+        try:
+            self.store.update(doc.id, mutate, "hooks")
+        except Exception:
+            logger.exception("hermes-canvas: could not record the finish hold on %s", doc.id)
+        return hold
 
 
 def plan_context(doc: Doc) -> str:
@@ -672,15 +710,13 @@ def box_problem(box: Box) -> str | None:
     return None
 
 
-def main_agent_problems(doc: Doc) -> list[str]:
-    problems = []
-    for box in doc.active_boxes():
-        if box.owner.startswith("sa-") and box.status == "doing":
-            continue  # a subagent builds it and answers for it in its own pre_verify
-        problem = box_problem(box)
-        if problem:
-            problems.append(problem)
-    return problems
+def main_agent_held_boxes(doc: Doc) -> list[Box]:
+    """The boxes that hold the main agent. A subagent answers for the box it is building."""
+    return [
+        box
+        for box in doc.active_boxes()
+        if not (box.owner.startswith("sa-") and box.status == "doing") and box_problem(box)
+    ]
 
 
 def gate_message(doc: Doc, problems: list[str]) -> str:

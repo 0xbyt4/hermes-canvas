@@ -9,7 +9,7 @@
 //
 // Plain ESM loaded uncompiled by Hermes Desktop: no JSX, and only the three allowed imports.
 import { host, useValue, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const PLUGIN_ID = 'hermes-canvas'
@@ -458,6 +458,19 @@ const STYLE = `
 .hc-finale { position: absolute; inset: 0; pointer-events: none; overflow: hidden; display: grid; place-items: center; }
 .hc-finale i { position: absolute; top: -12px; width: 7px; height: 11px; border-radius: 1px; opacity: 0; animation-name: hc-fall; animation-timing-function: cubic-bezier(.3,.6,.5,1); animation-fill-mode: forwards; }
 .hc-finale b { font-family: var(--hc-hand); font-size: 44px; color: var(--hc-done); transform: rotate(-6deg); text-shadow: 0 2px 0 var(--hc-paper); animation: hc-stamp .6s cubic-bezier(.2,1.6,.4,1) both; }
+.hc-born .hc-ink { stroke-dasharray: 1; stroke-dashoffset: 1; animation: hc-draw .75s ease-out var(--hc-delay, 0s) forwards; }
+.hc-born .hc-fill, .hc-born text, .hc-born .hc-opt, .hc-born .hc-notetag { opacity: 0; animation: hc-fadein .35s ease-out calc(var(--hc-delay, 0s) + .4s) forwards; }
+.hc-edge.hc-born-edge { stroke-dasharray: 1; stroke-dashoffset: 1; animation: hc-draw .5s ease-out var(--hc-delay, 0s) forwards; }
+.hc-arrow.hc-born-edge { opacity: 0; animation: hc-fadein .2s ease-out calc(var(--hc-delay, 0s) + .45s) forwards; }
+.hc-agent { pointer-events: none; transition: transform .7s cubic-bezier(.3,.7,.3,1); }
+.hc-agent.idle { opacity: .45; }
+.hc-agent-arrow { stroke: var(--hc-paper); stroke-width: 1.4; stroke-linejoin: round; }
+.hc-agent-name { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 10.5px; font-weight: 700; fill: #fff; }
+.hc-bubble { animation: hc-fadein .25s ease-out both; }
+.hc-bubble rect { fill: var(--hc-paper); stroke-width: 1.3; }
+.hc-bubble text { font-family: var(--hc-hand); font-size: 12.5px; fill: var(--hc-ink); }
+.hc-ripple { fill: none; stroke-width: 2; transform-box: fill-box; transform-origin: center; animation: hc-ripple .8s ease-out forwards; }
+.hc-gate { position: absolute; left: 50%; transform: translateX(-50%); max-width: calc(100% - 24px); box-sizing: border-box; font-size: 11.5px; font-weight: 600; padding: 4px 12px; border-radius: 999px; color: var(--hc-fail); background: color-mix(in srgb, var(--hc-fail) 12%, var(--hc-paper)); border: 1px solid var(--hc-fail); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; animation: hc-fadein .3s ease-out both; }
 .hc-history { border-top: 1px solid var(--hc-line); padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
 .hc-range { flex: 1; min-width: 80px; accent-color: var(--hc-accent); }
 .hc-past { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); font-size: 11px; padding: 2px 10px; border-radius: 999px; background: var(--hc-accent); color: var(--hc-paper); pointer-events: none; }
@@ -466,8 +479,13 @@ const STYLE = `
 @keyframes hc-stamp { 0% { opacity: 0; transform: rotate(-6deg) scale(2.2); } 100% { opacity: 1; transform: rotate(-6deg) scale(1); } }
 @keyframes hc-spin { to { transform: rotate(360deg); } }
 @keyframes hc-hatch { to { stroke-dashoffset: -22; } }
+@keyframes hc-draw { to { stroke-dashoffset: 0; } }
+@keyframes hc-fadein { from { opacity: 0; } to { opacity: 1; } }
+@keyframes hc-ripple { 0% { opacity: .9; transform: scale(1); } 100% { opacity: 0; transform: scale(4.5); } }
 @keyframes hc-pop { 0% { transform: scale(1); } 35% { transform: scale(1.07); } 100% { transform: scale(1); } }
-@media (prefers-reduced-motion: reduce) { .hc-ring, .hc-hatch, .hc-pop { animation: none; } .hc-comet, .hc-finale i { display: none; } .hc-finale b { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .hc-ring, .hc-hatch, .hc-pop, .hc-bubble, .hc-gate { animation: none; } .hc-comet, .hc-finale i, .hc-ripple { display: none; } .hc-finale b { animation: none; }
+  .hc-born .hc-ink, .hc-born .hc-fill, .hc-born text, .hc-born .hc-opt, .hc-born .hc-notetag, .hc-born-edge { animation: none; opacity: 1; stroke-dasharray: none; stroke-dashoffset: 0; }
+  .hc-agent { transition: none; } }
 `
 
 function Style() {
@@ -516,7 +534,7 @@ function Comet({ d }) {
   })
 }
 
-function Edge({ from, to, ok }) {
+function Edge({ from, to, ok, born }) {
   const { b, d, a } = edgeGeometry(from, to)
   const ang = Math.atan2(b.y - a.y, b.x - a.x)
   const head = [
@@ -526,10 +544,12 @@ function Edge({ from, to, ok }) {
   ]
     .map(p => p.map(f1).join(','))
     .join(' ')
+  const drawn = born === undefined ? '' : ' hc-born-edge'
   return jsxs('g', {
+    style: born === undefined ? undefined : { '--hc-delay': `${born}s` },
     children: [
-      jsx('path', { className: `hc-edge${ok ? ' ok' : ''}`, d }),
-      jsx('polygon', { className: `hc-arrow${ok ? ' ok' : ''}`, points: head })
+      jsx('path', { className: `hc-edge${ok ? ' ok' : ''}${drawn}`, d, pathLength: born === undefined ? undefined : 1 }),
+      jsx('polygon', { className: `hc-arrow${ok ? ' ok' : ''}${drawn}`, points: head })
     ]
   })
 }
@@ -589,16 +609,25 @@ function subLine(box) {
   return (box.files || []).join(', ')
 }
 
-function BoxEl({ box, pos, selected, popped, onPointerDown, onDoubleClick, onAnswer }) {
+// `born` is the draw-on delay in seconds for a box that just appeared, else undefined.
+function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick, onAnswer }) {
   const { w, h } = pos
   const state = boxState(box)
-  const cls = ['hc-el', `hc-${state}`, box.kind === 'question' ? 'hc-question' : '', box.kind === 'drift' ? 'hc-drift' : '']
+  const drawing = born !== undefined
+  const cls = [
+    'hc-el',
+    `hc-${state}`,
+    box.kind === 'question' ? 'hc-question' : '',
+    box.kind === 'drift' ? 'hc-drift' : '',
+    drawing ? 'hc-born' : ''
+  ]
   const children = [
     jsx('rect', { className: 'hc-fill', x: 2, y: 2, width: w - 4, height: h - 4, rx: 6 }, 'fill'),
     box.status === 'doing' && !box.removed && box.kind === 'component'
       ? jsx('path', { className: 'hc-hatch', d: hatchPath(box.id, w, h) }, 'hatch')
       : null,
-    jsx('path', { className: 'hc-ink', d: srect(hash(box.id), 0, 0, w, h) }, 'ink')
+    // pathLength turns the sketch into one stroke of length 1 for the draw-on dash.
+    jsx('path', { className: 'hc-ink', d: srect(hash(box.id), 0, 0, w, h), pathLength: drawing ? 1 : undefined }, 'ink')
   ]
   if (box.kind === 'question') {
     children.push(jsx(BoxLabel, { box, w, top: 26, size: 15, max: 24 }, 'label'))
@@ -668,11 +697,125 @@ function BoxEl({ box, pos, selected, popped, onPointerDown, onDoubleClick, onAns
   return jsx('g', {
     className: cls.filter(Boolean).join(' '),
     transform: `translate(${f1(pos.x)} ${f1(pos.y)})`,
+    style: drawing ? { '--hc-delay': `${born}s` } : undefined,
     onPointerDown: e => onPointerDown(e, box),
     onDoubleClick: () => onDoubleClick(box),
     'data-box': box.id,
     // A CSS transform on this group would replace its translate, so the pop runs on an inner group.
     children: jsx('g', { className: popped ? 'hc-pop' : undefined, children }, popped || 'still')
+  })
+}
+
+/* ---------- agents: who did the latest real work (the hooks' activity log) ---------- */
+
+const MAIN_ACTOR = 'main'
+const BUBBLE_MS = 4000
+const IDLE_REVISIONS = 10
+
+function actorName(actor) {
+  return actor === MAIN_ACTOR ? 'Hermes' : ownerName(actor)
+}
+
+function actorColor(actor) {
+  return actor === MAIN_ACTOR ? 'var(--hc-accent)' : `hsl(${hash(actor) % 360} 60% 44%)`
+}
+
+function baseName(path) {
+  const parts = String(path || '').split('/')
+  return parts[parts.length - 1] || String(path || '')
+}
+
+function activityText(a) {
+  const boxes = a.boxes || []
+  switch (a.kind) {
+    case 'start':
+      return 'took this box'
+    case 'write': {
+      // The hooks keep two file names and count the rest: "a.py, b.py +3".
+      const m = /^(.*?)( \+\d+)?$/.exec(String(a.detail || ''))
+      const files = m[1].split(', ').filter(Boolean)
+      return `wrote ${files.map(baseName).join(', ')}${m[2] || ''}`
+    }
+    case 'check':
+      return a.detail === 'exit 0' ? 'check passed' : `check failed (${a.detail})`
+    case 'veto':
+      return `write blocked: ${baseName(a.detail)}`
+    case 'gate':
+      return `cannot finish: ${boxes.length} box${boxes.length === 1 ? '' : 'es'} not passing`
+    default:
+      return ''
+  }
+}
+
+// Each agent at its latest activity. A subagent that stopped leaves the canvas.
+function agentsOf(doc) {
+  const latest = new Map()
+  for (const a of doc.activity || []) latest.set(a.actor, a)
+  const out = []
+  latest.forEach(a => {
+    if (a.kind === 'stop') return
+    const box = (a.boxes || []).map(id => doc.boxes.find(b => b.id === id)).find(Boolean)
+    if (box) out.push({ actor: a.actor, entry: a, box: box.id, idle: doc.revision - a.revision > IDLE_REVISIONS })
+  })
+  return out
+}
+
+// The newest finish hold, while its agent still runs and one of its boxes has not passed.
+// A subagent's run ends with its stop entry. The main agent's run ends with its turn, which only
+// the host knows: `mainBusy`.
+function gateOf(doc, mainBusy) {
+  const acts = doc.activity || []
+  for (let i = acts.length - 1; i >= 0; i--) {
+    if (acts[i].kind !== 'gate') continue
+    const actor = acts[i].actor
+    if (actor === MAIN_ACTOR ? !mainBusy : acts.slice(i + 1).some(a => a.actor === actor && a.kind === 'stop')) return null
+    const held = (acts[i].boxes || []).map(id => doc.boxes.find(b => b.id === id)).filter(b => b && !b.removed && b.status !== 'done')
+    return held.length ? { entry: acts[i], held } : null
+  }
+  return null
+}
+
+const AGENT_ARROW = 'M0 0 L0 17 L4.5 12.5 L8 20 L11 18.6 L7.6 11.4 L13.5 11.4 Z'
+
+function AgentMarker({ agent, pos, slot, bubble, ripple }) {
+  const color = actorColor(agent.actor)
+  const name = actorName(agent.actor)
+  const nameW = name.length * 6.4 + 12
+  const say = bubble ? clip(activityText(agent.entry), 34) : ''
+  const sayW = say.length * 5.7 + 18
+  // At the box's lower-left corner, the bubble under the name: both stay near the box's own
+  // width, so they fit in the view margin. A second agent on the same box sits to the right.
+  const x = pos.x + 12 + slot * 96
+  const y = pos.y + pos.h - 8
+  return jsxs('g', {
+    className: `hc-agent${agent.idle ? ' idle' : ''}`,
+    style: { transform: `translate(${f1(x)}px, ${f1(y)}px)` },
+    'aria-label': `${name}: ${activityText(agent.entry)}`,
+    children: [
+      ripple ? jsx('circle', { className: 'hc-ripple', r: 4, style: { stroke: color } }, `r${agent.entry.revision}`) : null,
+      jsx('path', { className: 'hc-agent-arrow', d: AGENT_ARROW, style: { fill: color } }),
+      jsxs('g', {
+        transform: 'translate(12 16)',
+        children: [
+          jsx('rect', { width: nameW, height: 16, rx: 8, style: { fill: color } }),
+          jsx('text', { className: 'hc-agent-name', x: nameW / 2, y: 11.5, textAnchor: 'middle', children: name })
+        ]
+      }),
+      say
+        ? jsxs(
+            'g',
+            {
+              className: 'hc-bubble',
+              transform: 'translate(12 36)',
+              children: [
+                jsx('rect', { width: sayW, height: 22, rx: 9, style: { stroke: color } }),
+                jsx('text', { x: 8, y: 15.5, children: say })
+              ]
+            },
+            `b${agent.entry.revision}`
+          )
+        : null
+    ]
   })
 }
 
@@ -1158,6 +1301,10 @@ function useSessionId() {
 function CanvasPane() {
   const session = useSessionId()
   const visible = useValue(host.paneVisibility(PANE_ID))
+  // Subscribed so that the pane redraws when the agent's turn starts or ends (the finish banner).
+  useValue(host.state.busyBySession)
+  useValue(host.state.busy)
+  const mainBusy = sessionBusy(session.ids)
   const [doc, setDoc] = useState(null)
   const [pending, setPending] = useState(0)
   const [loaded, setLoaded] = useState(false)
@@ -1227,6 +1374,9 @@ function CanvasPane() {
     setAdding(false)
     setHist(null)
     setFinale(false)
+    setBorn({})
+    setSaid({})
+    firstRef.current = true
     revSeq.current++
     setLoaded(false)
     load()
@@ -1299,7 +1449,11 @@ function CanvasPane() {
   const [focus, setFocus] = useState(null) // box id
   const [comets, setComets] = useState([]) // { key, d }
   const [pops, setPops] = useState({}) // box id -> stamp
-  const seenRef = useRef(null) // { id, boxes: Map }
+  const [born, setBorn] = useState({}) // box id -> [draw-on delay (s), stamp], while it draws itself
+  const [said, setSaid] = useState({}) // actor -> revision of the activity it shows in a bubble
+  const seenRef = useRef(null) // { id, boxes: Map, acts: Map }
+  const firstRef = useRef(true) // the first canvas after a chat switch draws itself
+  const bornSeq = useRef(0)
   const timersRef = useRef(new Set())
   const later = (fn, ms) => {
     const t = setTimeout(() => {
@@ -1309,16 +1463,39 @@ function CanvasPane() {
     timersRef.current.add(t)
   }
   useEffect(() => () => timersRef.current.forEach(clearTimeout), [])
+  // New boxes draw themselves, one after another in plan order.
+  const drawOn = list => {
+    if (!list.length) return
+    const stamp = ++bornSeq.current
+    setBorn(cur => ({ ...cur, ...Object.fromEntries(list.map((b, i) => [b.id, [Math.min(i * 0.12, 1.2), stamp]])) }))
+    later(() => setBorn(cur => Object.fromEntries(Object.entries(cur).filter(([, v]) => v[1] !== stamp))), 2800)
+  }
   // Entering or leaving the replay jumps between revisions: that jump is not a change to animate.
-  useEffect(() => {
+  useLayoutEffect(() => {
     seenRef.current = null
   }, [past])
-  useEffect(() => {
+  // A layout effect: a new box gets its draw-on class before the first paint shows it drawn.
+  useLayoutEffect(() => {
     if (!shown) return
     const seen = seenRef.current
     const now = new Map(shown.boxes.map(b => [b.id, { status: b.status, writes: b.writes, removed: b.removed }]))
-    seenRef.current = { id: shown.id, boxes: now }
-    if (!seen || seen.id !== shown.id) return
+    const acts = new Map(agentsOf(shown).map(a => [a.actor, a.entry.revision]))
+    seenRef.current = { id: shown.id, boxes: now, acts }
+    const first = firstRef.current && !past
+    if (!seen || seen.id !== shown.id) {
+      firstRef.current = false
+      if (first) drawOn(shown.boxes)
+      return
+    }
+    drawOn(shown.boxes.filter(b => !seen.boxes.has(b.id)))
+    // A bubble says what an agent just did: one per new activity.
+    const spoke = [...acts].filter(([actor, rev]) => seen.acts.get(actor) !== rev)
+    if (spoke.length) {
+      setSaid(cur => ({ ...cur, ...Object.fromEntries(spoke) }))
+      spoke.forEach(([actor, rev]) =>
+        later(() => setSaid(cur => (cur[actor] === rev ? Object.fromEntries(Object.entries(cur).filter(([k]) => k !== actor)) : cur)), BUBBLE_MS)
+      )
+    }
     const { changed, done } = diffBoxes(seen.boxes, shown.boxes)
     if (!changed.length) return
     const stamp = Date.now()
@@ -1534,10 +1711,31 @@ function CanvasPane() {
       const b = posOf(box.id)
       const src = shown.boxes.find(x => x.id === dep)
       if (a && b && src) {
-        edges.push(jsx(Edge, { from: { ...a, id: dep }, to: { ...b, id: box.id }, ok: src.status === 'done' }, `${dep}>${box.id}`))
+        const drawn = born[box.id] !== undefined || born[dep] !== undefined
+        const delay = Math.max(born[box.id] ? born[box.id][0] : 0, born[dep] ? born[dep][0] : 0) + 0.35
+        edges.push(
+          jsx(
+            Edge,
+            { from: { ...a, id: dep }, to: { ...b, id: box.id }, ok: src.status === 'done', born: drawn ? delay : undefined },
+            `${dep}>${box.id}`
+          )
+        )
       }
     }
   }
+
+  const agents = agentsOf(shown)
+  const slots = new Map()
+  const markers = agents.map(agent => {
+    const pos = posOf(agent.box)
+    if (!pos) return null
+    const slot = slots.get(agent.box) || 0
+    slots.set(agent.box, slot + 1)
+    // In the replay, each step shows what happened in that revision.
+    const fresh = past ? agent.entry.revision === shown.revision : said[agent.actor] === agent.entry.revision
+    return jsx(AgentMarker, { agent, pos, slot, bubble: fresh && !agent.idle, ripple: fresh }, agent.actor)
+  })
+  const gate = gateOf(shown, past || mainBusy)
 
   return jsxs('div', {
     className: 'hc-root',
@@ -1639,6 +1837,7 @@ function CanvasPane() {
                       pos,
                       selected: box.id === selected,
                       popped: pops[box.id] || 0,
+                      born: born[box.id] ? born[box.id][0] : undefined,
                       onPointerDown: onBoxPointerDown,
                       onDoubleClick: b => {
                         if (past) return
@@ -1650,10 +1849,20 @@ function CanvasPane() {
                     box.id
                   )
                 })
-              })
+              }),
+              jsx('g', { children: markers })
             ]
           }),
           past ? jsx('span', { className: 'hc-past', children: `Replay · revision ${shown.revision}` }) : null,
+          gate
+            ? jsx('div', {
+                className: 'hc-gate',
+                role: 'status',
+                style: { top: past ? 34 : 8 },
+                title: gate.held.map(b => b.label).join(', '),
+                children: `Finish held: ${actorName(gate.entry.actor)} waits for ${gate.held.map(b => b.label).join(', ')} to pass`
+              })
+            : null,
           finale && !past ? jsx(Finale, {}) : null
         ]
       }),

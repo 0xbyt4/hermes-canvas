@@ -12,7 +12,7 @@ from helpers import ROOT, SHOP_PLAN, SID, plan, start_api_subagent, terminal, wr
 
 from canvas.api import CanvasApi
 from canvas.hooks import BLOCK_PREFIX, CanvasHooks
-from canvas.model import Doc, apply_op
+from canvas.model import MAX_ACTIVITY, Doc, apply_op
 from canvas.runtime import CanvasRuntime
 from canvas.store import CanvasStore
 
@@ -671,3 +671,100 @@ def test_a_note_check_and_a_store_change_at_once_do_not_deadlock(hooks: CanvasHo
     writer.join(5)
     reader.join(5)
     assert not writer.is_alive() and not reader.is_alive()
+
+
+# -- activity: who did what, for the pane -------------------------------------------------
+
+
+def _activity(hooks: CanvasHooks, doc_id: str) -> list[tuple[str, str, list[str], str]]:
+    doc = hooks.store.get(doc_id)
+    return [(a.actor, a.kind, a.boxes, a.detail) for a in doc.activity]
+
+
+def test_activity_names_the_main_agent_and_the_subagent(hooks: CanvasHooks, doc_id: str) -> None:
+    write(hooks, f"{ROOT}/src/payments/api/charge.ts")
+    terminal(hooks, "npm test -- api", 1, "FAIL")
+    start_api_subagent(hooks, doc_id)
+    write(hooks, f"{ROOT}/src/payments/api/refund.ts", task_id="sa-0-aaaa1111", session_id="c1")
+    hooks.subagent_stop(child_session_id="c1", child_status="failed")
+    assert _activity(hooks, doc_id) == [
+        ("main", "write", ["api"], "src/payments/api/charge.ts"),
+        ("main", "check", ["api"], "exit 1"),
+        ("sa-0-aaaa1111", "start", ["api"], ""),
+        ("sa-0-aaaa1111", "write", ["api"], "src/payments/api/refund.ts"),
+        ("sa-0-aaaa1111", "stop", ["api"], "failed"),
+    ]
+    doc = hooks.store.get(doc_id)
+    assert doc.activity[-1].revision == doc.revision
+
+
+def test_activity_records_a_veto(hooks: CanvasHooks, doc_id: str) -> None:
+    hooks.store.update(doc_id, lambda d: apply_op(d, {"op": "remove", "id": "refund"}), "user")
+    args = {"path": f"{ROOT}/src/refund/page.tsx", "content": "x"}
+    reason = hooks.pre_tool_call(tool_name="write_file", args=args, task_id=SID, session_id=SID)
+    hooks.post_tool_call(
+        tool_name="write_file",
+        args=args,
+        result=json.dumps({"error": reason["message"]}),
+        task_id=SID,
+        session_id=SID,
+        status="blocked",
+        error_message=reason["message"],
+    )
+    assert _activity(hooks, doc_id)[-1] == ("main", "veto", ["refund"], "src/refund/page.tsx")
+
+
+def test_a_subagent_stop_is_recorded_when_the_box_does_not_change(hooks: CanvasHooks, doc_id: str) -> None:
+    start_api_subagent(hooks, doc_id)
+    terminal(hooks, "npm test -- api", 0, "PASS")
+    hooks.subagent_stop(child_session_id="c1", child_status="completed")
+    assert hooks.store.get(doc_id).require("api").status == "done"
+    assert _activity(hooks, doc_id)[-1] == ("sa-0-aaaa1111", "stop", ["api"], "completed")
+
+
+def test_activity_keeps_the_latest_entries(hooks: CanvasHooks, doc_id: str) -> None:
+    for i in range(MAX_ACTIVITY + 4):
+        write(hooks, f"{ROOT}/src/payments/api/f{i}.ts")
+    details = [a.detail for a in hooks.store.get(doc_id).activity]
+    assert len(details) == MAX_ACTIVITY
+    assert details[-1] == f"src/payments/api/f{MAX_ACTIVITY + 3}.ts"
+
+
+def test_activity_survives_the_store_round_trip() -> None:
+    doc = Doc(id="cv-1", session_id=SID, title="t", root=ROOT)
+    doc.record("main", "check", ["api", "api"], "exit 0")
+    loaded = Doc.from_dict(json.loads(json.dumps(doc.to_dict())))
+    rows = [(a.actor, a.kind, a.boxes, a.revision) for a in loaded.activity]
+    assert rows == [("main", "check", ["api"], 1)]
+    with pytest.raises(ValueError):
+        doc.record("main", "dance", [])
+
+
+def test_a_subagent_without_a_box_leaves_the_canvas_when_it_stops(hooks: CanvasHooks, doc_id: str) -> None:
+    hooks.subagent_start(
+        parent_session_id=SID,
+        child_session_id="c2",
+        child_subagent_id="sa-1-bbbb2222",
+        child_goal="Look around.",
+    )
+    write(hooks, f"{ROOT}/src/money.ts", task_id="sa-1-bbbb2222", session_id="c2")
+    hooks.subagent_stop(child_session_id="c2", child_status="completed")
+    assert _activity(hooks, doc_id)[-1] == ("sa-1-bbbb2222", "stop", [], "completed")
+
+
+def test_a_subagent_that_did_nothing_on_the_canvas_adds_no_revision(hooks: CanvasHooks, doc_id: str) -> None:
+    hooks.subagent_start(
+        parent_session_id=SID,
+        child_session_id="c2",
+        child_subagent_id="sa-1-bbbb2222",
+        child_goal="Look around.",
+    )
+    before = hooks.store.get(doc_id).revision
+    hooks.subagent_stop(child_session_id="c2", child_status="completed")
+    assert hooks.store.get(doc_id).revision == before
+
+
+def test_a_large_write_keeps_two_file_names_and_a_count(hooks: CanvasHooks, doc_id: str) -> None:
+    paths = [f"{ROOT}/src/payments/api/f{i}.ts" for i in range(5)]
+    hooks._record_writes(doc_id, paths, "", SID, "main")
+    assert _activity(hooks, doc_id)[-1][3] == "src/payments/api/f0.ts, src/payments/api/f1.ts +3"

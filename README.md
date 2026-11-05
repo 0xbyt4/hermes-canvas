@@ -12,7 +12,8 @@ exits. You steer the build by editing the canvas, before and during the build.
 
 | On the canvas | What happens |
 |---|---|
-| Watch the plan | Boxes change status from real file writes and check exit codes. |
+| Watch the plan | Boxes change status from real file writes and check exit codes. New boxes draw themselves. |
+| See who works where | Hermes and each subagent show as a named pointer on the box of their latest write, check or veto, with a short line on what they did. A subagent leaves the canvas when it stops. |
 | Answer a question box | Click an option on the canvas or on the chat card. The answer starts the next turn. |
 | Remove a box mid-build | The next write to that box's files is blocked, from the write tools and from the terminal. |
 | Add a box or leave a note | The agent gets your edit at the start of its next tool result, or of its next turn. A note on a box also reaches the subagent that builds it. |
@@ -22,7 +23,8 @@ exits. You steer the build by editing the canvas, before and during the build.
 | Export | Copy the plan as Mermaid. |
 
 The agent cannot finish its turn while a box it is responsible for is failing. The plugin holds
-it with the `pre_verify` hook (capped by Hermes's `agent.max_verify_nudges` setting).
+it with the `pre_verify` hook (capped by Hermes's `agent.max_verify_nudges` setting). The canvas
+shows a "Finish held" banner until those boxes pass.
 
 ## Why a plugin and not a prompt
 
