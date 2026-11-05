@@ -1,0 +1,7 @@
+{
+  "name": "hermes-canvas",
+  "label": "Hermes Canvas",
+  "description": "Backend for the canvas pane: read the canvas, apply the user's edits, list revisions.",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}

@@ -6,6 +6,7 @@ globs and a check command, so hooks can set its status from real tool calls.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -15,6 +16,7 @@ STATUSES = ("todo", "doing", "done", "failed")
 MAX_TEXT = 4000
 MAX_WRITTEN = 20
 MAX_LIST = 50
+MAX_COORD = 100_000  # board units; the pane draws boxes about 200 wide
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
@@ -79,7 +81,7 @@ class Box:
 
     @classmethod
     def from_plan(cls, raw: Any) -> Box:
-        """Build a box from model or user input. Unknown keys are ignored."""
+        """Build a box from model input. Unknown keys (and x/y) are ignored."""
         if not isinstance(raw, dict):
             raise CanvasError("each box must be an object")
         kind = raw.get("kind") or ("question" if raw.get("options") else "component")
@@ -94,10 +96,8 @@ class Box:
             after=_str_list(raw.get("after"), "after"),
             options=_str_list(raw.get("options"), "options"),
         )
-        for axis in ("x", "y"):
-            value = raw.get(axis)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                setattr(box, axis, float(value))
+        # Position is the user's: the pane lays boxes out to fit itself, and only a `move` op on
+        # the canvas pins a box. Model coordinates are ignored.
         return box
 
     @classmethod
@@ -295,6 +295,9 @@ def _op_move(doc: Doc, op: dict[str, Any]) -> str:
         value = op.get(axis)
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             raise CanvasError(f"{axis} must be a number")
+        # JSON parsing turns 1e999 into inf, which the store keeps but no JSON response can carry.
+        if not math.isfinite(value) or abs(value) > MAX_COORD:
+            raise CanvasError(f"{axis} must be a finite number within ±{MAX_COORD:g}")
         setattr(box, axis, float(value))
     return f"moved {box.id}"
 

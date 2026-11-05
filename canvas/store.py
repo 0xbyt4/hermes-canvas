@@ -16,10 +16,12 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from .model import Box, CanvasError, Doc, validate_plan
+
+EditSpec = tuple[str, str, str]  # kind, text, box_id
 
 logger = logging.getLogger(__name__)
 
@@ -141,13 +143,22 @@ class CanvasStore:
             ).fetchone()
         return Doc.from_dict(json.loads(row[0])) if row else None
 
-    def update(self, doc_id: str, mutate: Callable[[Doc], str | None], author: str) -> Doc | None:
+    def update(
+        self,
+        doc_id: str,
+        mutate: Callable[[Doc], str | None],
+        author: str,
+        edits: Sequence[EditSpec] = (),
+    ) -> Doc | None:
         """Load, change and save a document.
 
         `mutate` changes the document in place and returns a reason, or None for "no change".
         Returns the saved document, or None when nothing changed. A CanvasError from `mutate`
         leaves the stored document unchanged. When another process saved a newer revision in
         between, `mutate` runs again on the fresh document, so it must not have side effects.
+
+        `edits` (kind, text, box_id) are queued for the agent in the same transaction as the new
+        revision. `mutate` may fill the sequence; it is read after `mutate` returns.
         """
         if author not in AUTHORS:
             raise ValueError(f"unknown author {author!r}")
@@ -159,7 +170,7 @@ class CanvasStore:
                 reason = mutate(doc)
                 if reason is None:
                     return None
-                saved = self._save(doc, author, reason)
+                saved = self._save(doc, author, reason, edits)
                 if saved is not None:
                     return saved
             raise CanvasError("the canvas changed too often while saving; try again")
@@ -228,7 +239,7 @@ class CanvasStore:
 
     # -- internals -------------------------------------------------------------------------
 
-    def _save(self, doc: Doc, author: str, reason: str) -> Doc | None:
+    def _save(self, doc: Doc, author: str, reason: str, edits: Sequence[EditSpec] = ()) -> Doc | None:
         """Write the next revision in one transaction.
 
         Returns None, and writes nothing, when the stored revision is no longer `doc.revision`
@@ -258,6 +269,10 @@ class CanvasStore:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (doc.id, doc.revision, author, reason, body, doc.updated_at),
             )
+            self._conn.executemany(
+                "INSERT INTO edits (doc_id, kind, text, box_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                [(doc.id, kind, text, box_id, doc.updated_at) for kind, text, box_id in edits],
+            )
         for listener in list(self._listeners):
             try:
                 listener(doc, author, reason)
@@ -277,8 +292,7 @@ def _carry_state(prev: Box, box: Box) -> None:
     box.answer = prev.answer
     box.note = prev.note
     box.removed = prev.removed
-    if box.x is None and box.y is None:
-        box.x, box.y = prev.x, prev.y
+    box.x, box.y = prev.x, prev.y  # only the user's `move` sets a position
 
 
 def _new_id() -> str:
