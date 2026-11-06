@@ -20,6 +20,9 @@ MAX_LIST = 50
 MAX_COORD = 100_000
 MAX_NOTE = 500  # board units; the pane draws boxes about 200 wide
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+# Line breaks and other control characters. A label or an option is read inside the user's
+# instructions to the agent, so it must stay on one line there.
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 # Who did the real work the hooks saw: the main agent, or a subagent by its Hermes id (`sa-…`).
 MAIN_ACTOR = "main"
 ACTIVITY_KINDS = ("start", "write", "check", "veto", "stop", "gate")
@@ -42,6 +45,18 @@ def _text(value: Any, name: str, *, limit: int = MAX_TEXT, required: bool = Fals
     if len(value) > limit:
         raise CanvasError(f"{name} is longer than {limit} characters")
     return value
+
+
+def _line(value: Any, name: str, *, limit: int = 200, required: bool = False) -> str:
+    text = _text(value, name, limit=limit, required=required)
+    if CONTROL_RE.search(text):
+        raise CanvasError(f"{name} must be one line, without control characters")
+    return text
+
+
+def one_line(text: str) -> str:
+    """Text on one line: each control character becomes a space."""
+    return CONTROL_RE.sub(" ", text)
 
 
 def _str_list(value: Any, name: str) -> list[str]:
@@ -99,15 +114,18 @@ class Box:
         if kind == "drift":
             # Only the hooks make drift boxes, from real writes. A drawn one could carry any text
             # into the user's revert note.
-            raise CanvasError("drift boxes come from writes outside the plan; they cannot be drawn")
+            raise CanvasError(
+                "drift boxes come from writes outside the plan; they cannot be drawn. Leave them out: "
+                "a redraw keeps them"
+            )
         box = cls(
             id=_box_id(raw.get("id")),
-            label=_text(raw.get("label"), "label", limit=200, required=True),
+            label=_line(raw.get("label"), "label", required=True),
             kind=kind,
             files=_str_list(raw.get("files"), "files"),
             check=_text(raw.get("check"), "check", limit=500),
             after=_str_list(raw.get("after"), "after"),
-            options=_str_list(raw.get("options"), "options"),
+            options=[_line(o, "options") for o in _str_list(raw.get("options"), "options")],
         )
         # Position is the user's: the pane lays boxes out to fit itself, and only a `move` op on
         # the canvas pins a box. Model coordinates are ignored.
@@ -282,12 +300,14 @@ def _op_remove(doc: Doc, op: dict[str, Any]) -> str:
 def _op_restore(doc: Doc, op: dict[str, Any]) -> str:
     box = doc.require(_box_id(op.get("id")))
     box.removed = False
+    # Putting a drift box back means the user keeps that change after all.
+    box.revert_asked = False
     return f"restored {box.id}"
 
 
 def _op_rename(doc: Doc, op: dict[str, Any]) -> str:
     box = doc.require(_box_id(op.get("id")))
-    box.label = _text(op.get("label"), "label", limit=200, required=True)
+    box.label = _line(op.get("label"), "label", required=True)
     return f"renamed {box.id}"
 
 
@@ -347,7 +367,7 @@ def _op_adopt(doc: Doc, op: dict[str, Any]) -> str:
         raise CanvasError(f"box {box.id!r} was removed; restore it first")
     label = op.get("label")
     if label is not None:
-        box.label = _text(label, "label", limit=200, required=True)
+        box.label = _line(label, "label", required=True)
     box.kind = "component"
     box.status = "done"
     box.revert_asked = False
@@ -444,7 +464,9 @@ NOTE_CLEARED_PREFIX = "Removed the note on box "
 def quote_path(path: str) -> str:
     """A file path as a JSON string: quoted, with control characters escaped. Paths come from
     tool calls, so they must never read as text of their own in the agent's context."""
-    return json.dumps(path, ensure_ascii=False)
+    # json.dumps leaves the Unicode line breaks as they are; escape them too.
+    quoted = json.dumps(path, ensure_ascii=False)
+    return quoted.replace("\x85", "\\u0085").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
 
 
 def note_set_tail(note: str) -> str:

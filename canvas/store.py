@@ -102,8 +102,8 @@ class CanvasStore:
     def draw(self, session_id: str, title: str, root: str, boxes: list[Box]) -> Doc:
         """Create the session's canvas, or replace its plan with a new revision.
 
-        Box state (status, writes, check result) is kept for boxes that keep their id, so a redraw
-        does not erase work that already happened.
+        Box state (status, writes, check result) is kept for boxes that keep their id, and drift
+        boxes are kept as they are, so a redraw does not erase work that already happened.
         """
         validate_plan(boxes)
         with self._lock:
@@ -119,8 +119,12 @@ class CanvasStore:
                     old = {b.id: b for b in existing.boxes}
                     for box in fresh:
                         prev = old.get(box.id)
+                        if prev is not None and prev.kind == "drift":
+                            raise CanvasError(f"box id {box.id!r} belongs to a drift box; use another id")
                         if prev is not None:
                             _carry_state(prev, box)
+                    # Drift boxes record real writes outside the plan. A redraw cannot hide them.
+                    fresh.extend(Box.from_dict(b.to_dict()) for b in existing.boxes if b.kind == "drift")
                     doc.title = title
                     doc.root = root
                     reason = "redrew the plan"

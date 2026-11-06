@@ -275,6 +275,8 @@ def _box_view(box: Box) -> dict[str, Any]:
         view["answer"] = box.answer
     if box.note:
         view["note"] = box.note
+    if box.revert_asked:
+        view["revert_asked"] = True
     if box.owner:
         view["owner"] = box.owner
     return view

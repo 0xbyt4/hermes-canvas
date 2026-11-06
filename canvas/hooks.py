@@ -22,7 +22,16 @@ import time
 from typing import Any
 
 from .binding import WRITE_TOOLS, Binding, check_test_paths, paths_from_args, paths_from_result, relativize
-from .model import MAIN_ACTOR, MAX_WRITTEN, NOTE_CLEARED_PREFIX, Box, Doc, note_set_tail, quote_path
+from .model import (
+    MAIN_ACTOR,
+    MAX_WRITTEN,
+    NOTE_CLEARED_PREFIX,
+    Box,
+    Doc,
+    note_set_tail,
+    one_line,
+    quote_path,
+)
 from .runtime import CanvasRuntime
 from .shell import code_paths, shell_scan
 from .store import Edit
@@ -564,6 +573,9 @@ def plan_context(doc: Doc) -> str:
         shown = ", ".join(quote_path(b.files[0]) for b in drift[:MAX_DRIFT_IN_CONTEXT] if b.files)
         more = f" and {len(drift) - MAX_DRIFT_IN_CONTEXT} more" if len(drift) > MAX_DRIFT_IN_CONTEXT else ""
         rows.append(f"Writes outside every box (drift): {shown}{more}")
+    undo = [quote_path(b.files[0]) for b in drift if b.revert_asked and b.files]
+    if undo:
+        rows.append(f"The user asked you to undo your change to: {', '.join(undo)}")
     removed = [b.id for b in doc.boxes if b.removed]
     if removed:
         rows.append(f"Removed from the plan (do not build): {', '.join(removed)}")
@@ -771,7 +783,8 @@ def _drift_box(doc: Doc, rel: str) -> Box:
     n = 1
     while f"drift-{n}" in used:
         n += 1
-    box = Box(id=f"drift-{n}", label=rel, kind="drift", files=[rel], status="doing")
+    # The label is shown and read as text; `files` keeps the exact path.
+    box = Box(id=f"drift-{n}", label=one_line(rel), kind="drift", files=[rel], status="doing")
     doc.boxes.append(box)
     return box
 

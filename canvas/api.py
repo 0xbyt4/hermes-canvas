@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .diffs import box_diffs
-from .model import Box, CanvasError, Doc, apply_op, note_edit_text, quote_path, ready_boxes
+from .model import Box, CanvasError, Doc, apply_op, note_edit_text, one_line, quote_path, ready_boxes
 from .runtime import CanvasRuntime
 from .store import EditSpec
 
@@ -180,7 +180,8 @@ def edit_note(op: dict[str, Any], before: Box | None, after: Box | None) -> str 
     name = op.get("op")
     if after is None or name == "move":
         return None
-    label = f"'{after.id}' ({after.label})"
+    # Labels are one line when they are set; stored data from older versions may not be.
+    label = f"'{after.id}' ({one_line(after.label)})"
     if name == "add":
         if before is not None:
             return None
@@ -194,18 +195,25 @@ def edit_note(op: dict[str, Any], before: Box | None, after: Box | None) -> str 
     if name == "remove" and not before.removed:
         return f"Removed box {label} from the plan. Do not build it, and stop work on it now."
     if name == "restore" and before.removed:
+        if after.kind == "drift":
+            files = ", ".join(quote_path(f) for f in after.files)
+            return (
+                f"Put drift box '{after.id}' back on the canvas: the user wants to see your change to "
+                f"{files}. Do not undo it now. If you already undid it, say so."
+            )
         if after.status == "done":
             return f"Put box {label} back in the plan. It is already done: keep it, do not rebuild it."
         return f"Put box {label} back in the plan. Build it."
     if name == "rename" and before.label != after.label:
         return (
-            f"Renamed box '{after.id}' from '{before.label}' to '{after.label}'. Use the new name and intent."
+            f"Renamed box '{after.id}' from '{one_line(before.label)}' to '{one_line(after.label)}'. "
+            "Use the new name and intent."
         )
     if name == "adopt" and before.kind == "drift":
         files = ", ".join(quote_path(f) for f in after.files)
         return (
             f"Added {files}, which you wrote outside the plan, to the plan as box '{after.id}' "
-            f"({after.label}). Keep it as part of the work."
+            f"({one_line(after.label)}). Keep it as part of the work."
         )
     if name == "note" and before.note != after.note:
         return note_edit_text(label, after.note)
