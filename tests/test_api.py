@@ -503,6 +503,21 @@ def test_removing_a_box_tells_the_agent_which_boxes_it_no_longer_blocks(api: Can
     )
 
 
+def test_restoring_a_box_tells_the_agent_which_boxes_wait_for_it_again(api: CanvasApi, doc_id: str) -> None:
+    api.edit(doc_id, [{"op": "remove", "id": "ui"}])
+    api.edit(doc_id, [{"op": "restore", "id": "ui"}])
+    restored = api.store.pending_edits(doc_id)[-1].text
+    assert restored == "Put box 'ui' (Checkout UI) back in the plan. Build it."
+    api.edit(doc_id, [{"op": "remove", "id": "api"}])
+    api.edit(doc_id, [{"op": "restore", "id": "api"}])
+    assert api.store.pending_edits(doc_id)[-1].text == (
+        "Put box 'api' (Payment API) back in the plan. Build it. Boxes 'ui', 'refund' wait for it again."
+    )
+    api.edit(doc_id, [{"op": "remove", "id": "ui"}, {"op": "remove", "id": "api"}])
+    api.edit(doc_id, [{"op": "restore", "id": "api"}])
+    assert api.store.pending_edits(doc_id)[-1].text.endswith("Box 'refund' waits for it again.")
+
+
 def test_removing_a_box_names_every_box_it_no_longer_blocks(api: CanvasApi, doc_id: str) -> None:
     api.edit(doc_id, [{"op": "remove", "id": "api"}])
     assert api.store.pending_edits(doc_id)[-1].text.endswith(

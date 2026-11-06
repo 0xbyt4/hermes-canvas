@@ -216,8 +216,18 @@ def edit_note(
                 f"{files}. Do not undo it now. If you already undid it, say so."
             )
         if after.status == "done":
-            return f"Put box {label} back in the plan. It is already done: keep it, do not rebuild it."
-        return f"Put box {label} back in the plan. Build it."
+            text = f"Put box {label} back in the plan. It is already done: keep it, do not rebuild it."
+        else:
+            text = f"Put box {label} back in the plan. Build it."
+        if waiting:
+            # The removal note said these boxes no longer wait for it; take that back, or the agent
+            # drops the dependency from the plan.
+            names = ", ".join(f"'{w}'" for w in waiting)
+            if len(waiting) == 1:
+                text += f" Box {names} waits for it again."
+            else:
+                text += f" Boxes {names} wait for it again."
+        return text
     if name == "rename" and before.label != after.label:
         return (
             f"Renamed box '{after.id}' from '{one_line(before.label)}' to '{one_line(after.label)}'. "
