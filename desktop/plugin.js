@@ -49,10 +49,25 @@ function rest(path, opts) {
   return pluginCtx.rest(path, opts)
 }
 
+// Electron wraps a backend error as
+// `Error invoking remote method 'hermes:api': Error: 400: {"detail":"..."}`; show only the detail.
+const WRAPPED_ERROR_RE = /^Error invoking remote method '[^']*': (?:Error: )?(?:\d{3}: )?/
+
 function errorText(err) {
   if (!err) return 'unknown error'
   if (typeof err === 'string') return err
-  return err.detail || err.message || String(err)
+  if (err.detail) return String(err.detail)
+  const message = String(err.message || err)
+  const rest = message.replace(WRAPPED_ERROR_RE, '')
+  if (rest !== message && rest.startsWith('{')) {
+    try {
+      const body = JSON.parse(rest)
+      if (body && typeof body.detail === 'string') return body.detail
+    } catch {
+      // Not JSON: show the unwrapped text.
+    }
+  }
+  return rest
 }
 
 /* ---------- sketch geometry (deterministic per box id, so redraws do not wobble) ---------- */
@@ -1498,6 +1513,9 @@ function CanvasPane() {
     setSelected(null)
     setRenaming(false)
     setAdding(false)
+    setLinking(false)
+    setLink(null)
+    setDrag(null)
     setHist(null)
     setFinale(false)
     setBorn({})
