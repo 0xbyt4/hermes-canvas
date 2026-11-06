@@ -800,17 +800,21 @@ function agentsOf(doc) {
   return out
 }
 
-// The newest finish hold, while its agent still runs and one of its boxes has not passed.
-// A subagent's run ends with its stop entry. The main agent's run ends with its turn, which only
-// the host knows: `mainBusy`.
-function gateOf(doc, mainBusy) {
+// The newest finish hold whose agent still runs and that still holds a box that has not passed.
+// A subagent's run ends with its stop entry. The main agent's run is its current turn, which only
+// the host knows: `mainSince` is the revision the turn started at, or null between turns.
+function gateOf(doc, mainSince) {
   const acts = doc.activity || []
   for (let i = acts.length - 1; i >= 0; i--) {
-    if (acts[i].kind !== 'gate') continue
-    const actor = acts[i].actor
-    if (actor === MAIN_ACTOR ? !mainBusy : acts.slice(i + 1).some(a => a.actor === actor && a.kind === 'stop')) return null
-    const held = (acts[i].boxes || []).map(id => doc.boxes.find(b => b.id === id)).filter(b => b && !b.removed && b.status !== 'done')
-    return held.length ? { entry: acts[i], held } : null
+    const entry = acts[i]
+    if (entry.kind !== 'gate') continue
+    const ended =
+      entry.actor === MAIN_ACTOR
+        ? mainSince === null || entry.revision <= mainSince
+        : acts.slice(i + 1).some(a => a.actor === entry.actor && a.kind === 'stop')
+    if (ended) continue
+    const held = (entry.boxes || []).map(id => doc.boxes.find(b => b.id === id)).filter(b => b && !b.removed && b.status !== 'done')
+    if (held.length) return { entry, held }
   }
   return null
 }
@@ -1399,6 +1403,9 @@ function CanvasPane() {
   useValue(host.state.busyBySession)
   useValue(host.state.busy)
   const mainBusy = sessionBusy(session.ids)
+  // The revision at which the agent's current turn started: a finish hold from an earlier turn
+  // does not hold this one.
+  const turnRef = useRef({ busy: false, doc: null, since: null })
   const [doc, setDoc] = useState(null)
   const [pending, setPending] = useState(0)
   const [loaded, setLoaded] = useState(false)
@@ -1878,7 +1885,10 @@ function CanvasPane() {
     const fresh = past ? agent.entry.revision === shown.revision : said[agent.actor] === agent.entry.revision
     return jsx(AgentMarker, { agent, pos, slot, bubble: fresh && !agent.idle, ripple: fresh }, agent.actor)
   })
-  const gate = gateOf(shown, past || mainBusy)
+  const turn = turnRef.current
+  if (!mainBusy) turnRef.current = { busy: false, doc: null, since: null }
+  else if (doc && (!turn.busy || turn.doc !== doc.id)) turnRef.current = { busy: true, doc: doc.id, since: doc.revision }
+  const gate = gateOf(shown, past ? -1 : turnRef.current.since)
 
   return jsxs('div', {
     className: 'hc-root',
