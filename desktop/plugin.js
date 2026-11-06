@@ -160,8 +160,10 @@ function boxSize(box) {
 }
 
 // Every box gets an automatic slot by dependency depth: in columns (left to right) on a wide pane,
-// in rows (top to bottom) on a tall one, so boxes stay readable. A box the user moved keeps its own
-// x/y, but still holds its slot, so moving one box never shifts the others.
+// in rows (top to bottom) on a tall one, so boxes stay readable. A box sits one step before the
+// first box that waits for it, so a box with no dependencies is drawn next to its user, not far
+// to the left. A box the user moved keeps its own x/y, but still holds its slot, so moving one box
+// never shifts the others.
 function layout(boxes, vertical) {
   const byId = new Map(boxes.map(b => [b.id, b]))
   const depth = new Map()
@@ -175,6 +177,18 @@ function layout(boxes, vertical) {
     depth.set(id, d)
     return d
   }
+  const users = new Map() // box id -> the boxes that wait for it
+  for (const box of boxes) {
+    for (const a of box.after || []) if (byId.has(a)) users.set(a, [...(users.get(a) || []), box.id])
+  }
+  // Latest level: users first (they are deeper), then each box one level before its nearest user.
+  const levels = new Map()
+  const order = boxes.filter(b => b.kind !== 'drift').sort((a, b) => depthOf(b.id) - depthOf(a.id))
+  for (const box of order) {
+    const deps = (users.get(box.id) || []).filter(id => levels.has(id))
+    const latest = deps.length ? Math.min(...deps.map(id => levels.get(id))) - 1 : depthOf(box.id)
+    levels.set(box.id, box.kind === 'question' ? 0 : Math.max(depthOf(box.id), latest))
+  }
   const rows = new Map()
   const auto = new Map()
   const driftRow = []
@@ -183,7 +197,7 @@ function layout(boxes, vertical) {
       driftRow.push(box)
       continue
     }
-    const level = box.kind === 'question' ? 0 : depthOf(box.id)
+    const level = levels.get(box.id)
     const slot = rows.get(level) || 0
     rows.set(level, slot + 1)
     const x = vertical ? slot * (BOX.w + 44) : level * (BOX.w + GAP.x + 40)
@@ -219,6 +233,8 @@ function stickyView(prev, next) {
 
 const CAMERA_MS = 650
 const FOCUS_MS = 2600
+// The camera holds still while the pointer moves on the board, and this long after it stops.
+const HOLD_MS = 1500
 
 // A view centered on one box, with the fit view's aspect, or null when zooming would not help.
 function focusView(fit, p) {
@@ -1557,6 +1573,16 @@ function CanvasPane() {
   // it, and the camera (with Follow on) moves to the box that changed, then back to the whole plan.
   const [follow, setFollow] = useState(readFollow)
   const [hover, setHover] = useState(false)
+  const holdRef = useRef(null)
+  // A pointer that rests on the board (after a click, say) must not stop the camera for good.
+  const holdCamera = () => {
+    setHover(true)
+    clearTimeout(holdRef.current)
+    holdRef.current = setTimeout(() => {
+      if (!dragRef.current && !linkRef.current) setHover(false)
+    }, HOLD_MS)
+  }
+  useEffect(() => () => clearTimeout(holdRef.current), [])
   const [focus, setFocus] = useState(null) // box id
   const [comets, setComets] = useState([]) // { key, d }
   const [pops, setPops] = useState({}) // box id -> stamp
@@ -1956,14 +1982,17 @@ function CanvasPane() {
       jsxs('div', {
         className: `hc-board${linking ? ' hc-linking' : ''}`,
         ref: boardRef,
-        // The camera holds still under the pointer, so a box never moves away from a click.
+        // The camera holds still under a moving pointer, so a box never moves away from a click.
         onPointerEnter: () => {
-          setHover(true)
+          holdCamera()
           setFocus(null)
         },
+        onPointerMove: holdCamera,
         onPointerLeave: () => {
+          clearTimeout(holdRef.current)
           if (!dragRef.current) setHover(false)
         },
+        onPointerUp: holdCamera,
         children: [
           jsxs('svg', {
             ref: svgRef,
