@@ -8,6 +8,12 @@ box is bound to files and a check command. Box status comes from hooks, not from
 is "doing" when the agent writes one of its files, and "done" or "failed" when its check command
 exits. You steer the build by editing the canvas, before and during the build.
 
+![History replay of a 10-box build on the canvas](docs/replay.gif)
+
+The replay shows one real build with Claude Haiku 5.5. Four subagents build in parallel. The user
+removes a box mid-build, and the next write to it is blocked. A failing check holds the finish until
+the agent fixes it.
+
 ## What you can do
 
 | On the canvas | What happens |
@@ -110,11 +116,6 @@ Read this before you install.
 - **Never writes project files.** "Revert" on a drift box asks the agent to restore the file; the
   plugin does not change it.
 - No network calls, no credentials, no background processes, no self-update.
-
-## Demo
-
-`docs/demo.md` has the demo prompt and the story. The demo app is a small TypeScript shop with
-vitest tests.
 
 ## Development
 
