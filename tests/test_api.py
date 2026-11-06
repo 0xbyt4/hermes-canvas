@@ -484,3 +484,27 @@ def test_recent_edits_show_what_the_agent_reads_and_when_it_got_them(api: Canvas
     assert out["edits"][0]["delivered_at"] is not None
     with pytest.raises(CanvasError, match="no canvas"):
         api.edits("cv-0000000000")
+
+
+def test_removing_a_box_tells_the_agent_which_boxes_it_no_longer_blocks(api: CanvasApi, doc_id: str) -> None:
+    api.edit(doc_id, [{"op": "link", "id": "refund", "after": "ui"}])
+    api.edit(doc_id, [{"op": "remove", "id": "ui"}])
+    assert api.store.pending_edits(doc_id)[-1].text == (
+        "Removed box 'ui' (Checkout UI) from the plan. Do not build it, and stop work on it now. "
+        "Box 'refund' no longer waits for it: build it once its other dependencies are done."
+    )
+    api.edit(doc_id, [{"op": "remove", "id": "api"}])
+    assert api.store.pending_edits(doc_id)[-1].text.endswith(
+        "Box 'refund' no longer waits for it: build it once its other dependencies are done."
+    )
+    api.edit(doc_id, [{"op": "remove", "id": "refund"}])
+    assert api.store.pending_edits(doc_id)[-1].text == (
+        "Removed box 'refund' (Refund page) from the plan. Do not build it, and stop work on it now."
+    )
+
+
+def test_removing_a_box_names_every_box_it_no_longer_blocks(api: CanvasApi, doc_id: str) -> None:
+    api.edit(doc_id, [{"op": "remove", "id": "api"}])
+    assert api.store.pending_edits(doc_id)[-1].text.endswith(
+        "Boxes 'ui', 'refund' no longer wait for it: build them once their other dependencies are done."
+    )

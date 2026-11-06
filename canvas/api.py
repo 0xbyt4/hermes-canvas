@@ -8,7 +8,7 @@ them as the user's own instructions on its next turn (see `hooks.edits_context`)
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from .diffs import box_diffs
@@ -82,7 +82,8 @@ class CanvasApi:
                 box_id = _target_id(op)
                 before = _box_copy(doc, box_id)
                 reasons.append(apply_op(doc, op))
-                note = edit_note(op, before, doc.box(box_id))
+                waiting = [b.id for b in doc.active_boxes() if box_id in b.after]
+                note = edit_note(op, before, doc.box(box_id), waiting)
                 if note is not None:
                     notes.append((op["op"], note, box_id))
             return "; ".join(reasons)
@@ -171,7 +172,9 @@ def doc_view(doc: Doc) -> dict[str, Any]:
     return data
 
 
-def edit_note(op: dict[str, Any], before: Box | None, after: Box | None) -> str | None:
+def edit_note(
+    op: dict[str, Any], before: Box | None, after: Box | None, waiting: Sequence[str] = ()
+) -> str | None:
     """The sentence the agent reads for one user edit, or None when the agent need not know.
 
     A move never needs a note, and neither does an op that changed nothing (for example a second
@@ -193,7 +196,18 @@ def edit_note(op: dict[str, Any], before: Box | None, after: Box | None) -> str 
     if before is None:
         return None
     if name == "remove" and not before.removed:
-        return f"Removed box {label} from the plan. Do not build it, and stop work on it now."
+        text = f"Removed box {label} from the plan. Do not build it, and stop work on it now."
+        if waiting:
+            # A removed box no longer blocks the boxes after it; say so, or the agent waits for it.
+            names = ", ".join(f"'{w}'" for w in waiting)
+            if len(waiting) == 1:
+                text += f" Box {names} no longer waits for it: build it once its other dependencies are done."
+            else:
+                text += (
+                    f" Boxes {names} no longer wait for it: build them once their other dependencies "
+                    "are done."
+                )
+        return text
     if name == "restore" and before.removed:
         if after.kind == "drift":
             files = ", ".join(quote_path(f) for f in after.files)
