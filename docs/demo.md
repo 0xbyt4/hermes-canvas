@@ -22,13 +22,21 @@ using the goals from canvas_next. Run each box's check command exactly as writte
 
 ## Story
 
-1. The plan draws itself on the canvas.
+1. The plan draws itself on the canvas, box by box.
 2. The user adds a box with "+ Box" and removes one.
-3. The user picks the provider on the chat card. This sends the next turn.
-4. Subagents build, and their boxes light up.
-5. The user leaves a note on a box while it is built.
-6. The user removes the refund page during the build. Its next write is blocked.
-7. `src/money.ts` has a bug (cents without a leading zero). The receipt check fails red.
-8. The finish gate holds the agent until the check passes. The fix in `src/money.ts` shows as a
-   drift box, and the user adds it to the plan.
-9. Every box is done.
+3. With "→ Link", the user makes the receipt email wait for the checkout page. The agent gets the
+   change like any other edit.
+4. The user picks the provider on the chat card. This sends the next turn.
+5. Subagents build the checkout and refund pages. Each one shows as a named pointer on its box. A
+   short line on its last real write or check shows for a few seconds.
+6. The user leaves a note on a box while it is built. The chat card lists the note as "waiting",
+   then "delivered" once the agent got it. The subagent of that box gets it too.
+7. The user removes the refund page while its subagent builds it. Its next write is blocked.
+8. The receipt email starts after the checkout page. `src/money.ts` has a bug (cents without a
+   leading zero), so the receipt check fails red.
+9. The finish gate holds the agent until the check passes, and the canvas shows a "Finish held"
+   banner. The fix in `src/money.ts` shows as a drift box, and the user adds it to the plan.
+10. Every box is done.
+
+A drift box the user does not want gets "Revert" instead of "Add to plan": the agent undoes its
+own change to that file and removes the box.
