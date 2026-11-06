@@ -63,7 +63,8 @@ Hermes Agent 0.22.7 or later is required.
 
    Hermes Desktop starts the gateway again.
 3. In Hermes Desktop, open the **Canvas** pane.
-4. Ask for a plan, for example: "Plan it on the canvas first, then build it."
+4. Ask for a plan, for example: "Plan it on the canvas first, then build it." Or start your
+   message with `/hermes-canvas:hermes-canvas`: it loads the skill for that message.
 
 The plugin ships a skill (`hermes-canvas`) that tells the agent how to plan, how to bind files
 and checks to boxes, and how to delegate boxes to subagents.
