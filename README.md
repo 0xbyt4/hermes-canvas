@@ -11,8 +11,8 @@ exits. You steer the build by editing the canvas, before and during the build.
 ![History replay of a 10-box build on the canvas](docs/replay.gif)
 
 The replay shows one real build with Claude Haiku 5.5. Four subagents build in parallel. The user
-removes a box mid-build, and the next write to it is blocked. A failing check holds the finish until
-the agent fixes it.
+removes a box mid-build, and the next write to it is blocked. A failing check holds the finish
+while the agent works on it. Hermes caps the holds (`agent.max_verify_nudges`, 3 by default).
 
 ## What you can do
 
