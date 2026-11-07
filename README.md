@@ -14,6 +14,11 @@ The replay shows one real build with Claude Haiku 5.5. Four subagents build in p
 removes a box mid-build, and the next write to it is blocked. A failing check holds the finish
 while the agent works on it. Hermes caps the holds (`agent.max_verify_nudges`, 3 by default).
 
+Demo video (88 s): [a real build with Claude Opus 5.5 on X](https://x.com/0xbyt4/status/2119026815603744904).
+Sped-up parts are marked in the video.
+
+![The finished build: 9 of 9 boxes done, with the inspector open on a box](docs/all-green.jpg)
+
 ## What you can do
 
 | On the canvas | What happens |
