@@ -184,8 +184,11 @@ def test_repeated_remove_or_restore_queues_one_note(api: CanvasApi, doc_id: str)
 
 
 def test_restoring_a_finished_box_does_not_ask_for_a_rebuild(api: CanvasApi, doc_id: str) -> None:
-    done = {"op": "set_status", "id": "api", "status": "done"}
-    api.store.update(doc_id, lambda d: apply_op(d, done), "hooks")
+    def check_passed(doc: Doc) -> str:
+        doc.require("api").status = "done"
+        return "check api exit 0"
+
+    api.store.update(doc_id, check_passed, "hooks")
     api.edit(doc_id, [{"op": "remove", "id": "api"}])
     api.edit(doc_id, [{"op": "restore", "id": "api"}])
     note = api.store.pending_edits(doc_id)[-1].text

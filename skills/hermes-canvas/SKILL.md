@@ -20,7 +20,9 @@ The canvas shows your plan to the user as boxes. Hooks set each box's status fro
 - A write that matches no box appears as a **drift** box. The user decides if it belongs in the plan.
 - A write to a box the user removed is blocked, from the write tools and from the terminal.
 
-You cannot set status by talking about it. Only real writes and checks change it.
+You cannot set status by talking about it. Only real writes and checks change it. `set_status`
+cannot make a box with a check done or failed, and a new `check` sets a finished box back until you
+run it.
 
 ## When to plan
 

@@ -15,9 +15,11 @@ IN_ROOT = [f"{ROOT}/src/payments/api/charge.ts"]  # a turn that wrote inside the
 
 
 def set_status(hooks: CanvasHooks, doc_id: str, **statuses: str) -> None:
+    """Stand in for the hook results (a passing check, for example) that set these statuses."""
+
     def mutate(doc: Doc) -> str:
         for box_id, status in statuses.items():
-            apply_op(doc, {"op": "set_status", "id": box_id, "status": status})
+            doc.require(box_id).status = status
         return "test"
 
     hooks.store.update(doc_id, mutate, "hooks")

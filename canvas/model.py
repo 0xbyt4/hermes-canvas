@@ -319,7 +319,15 @@ def _op_set_files(doc: Doc, op: dict[str, Any]) -> str:
 
 def _op_set_check(doc: Doc, op: dict[str, Any]) -> str:
     box = doc.require(_box_id(op.get("id")))
-    box.check = _text(op.get("check"), "check", limit=500)
+    check = _text(op.get("check"), "check", limit=500)
+    if box.check and not check:
+        raise CanvasError(f"box {box.id!r} has a check; change it instead of removing it")
+    if check != box.check and box.status in ("done", "failed"):
+        # A new check has not run yet: the old result does not count for it.
+        box.status = "doing" if box.writes else "todo"
+        box.check_exit = None
+        box.check_output = ""
+    box.check = check
     return f"set check of {box.id}"
 
 
@@ -340,6 +348,12 @@ def _op_set_status(doc: Doc, op: dict[str, Any]) -> str:
     status = op.get("status")
     if status not in STATUSES:
         raise CanvasError(f"status must be one of {', '.join(STATUSES)}")
+    if box.check and status in ("done", "failed"):
+        # Only the check's exit code, read by a hook, makes a checked box done or failed.
+        raise CanvasError(
+            f"box {box.id!r} has a check: run `{box.check}` with the terminal tool; "
+            "its exit code sets done or failed"
+        )
     box.status = status
     return f"set status of {box.id} to {status}"
 

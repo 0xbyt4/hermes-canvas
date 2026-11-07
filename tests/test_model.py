@@ -86,6 +86,38 @@ def test_answer_only_for_questions() -> None:
         apply_op(doc, {"op": "answer", "id": "api", "answer": "x"})
 
 
+def test_set_status_cannot_pass_or_fail_a_box_with_a_check() -> None:
+    doc = make_doc()
+    for status in ("done", "failed"):
+        with pytest.raises(CanvasError, match="run `npm test -- api` with the terminal tool"):
+            apply_op(doc, {"op": "set_status", "id": "api", "status": status})
+    assert doc.require("api").status == "todo"
+    apply_op(doc, {"op": "set_status", "id": "api", "status": "doing"})
+    # A box without a check has nothing a hook can run, so the agent may finish it by hand.
+    apply_op(doc, {"op": "set_status", "id": "ui", "status": "done"})
+    assert doc.require("ui").status == "done"
+
+
+def test_a_check_cannot_be_removed() -> None:
+    with pytest.raises(CanvasError, match="change it instead of removing it"):
+        apply_op(make_doc(), {"op": "set_check", "id": "api", "check": " "})
+
+
+def test_a_new_check_resets_a_finished_box_until_it_runs() -> None:
+    doc = make_doc()
+    apply_op(doc, {"op": "set_status", "id": "ui", "status": "done"})
+    apply_op(doc, {"op": "set_check", "id": "ui", "check": "npm test -- ui"})
+    assert doc.require("ui").status == "todo"
+    api = doc.require("api")
+    api.status, api.check_exit, api.check_output, api.writes = "failed", 1, "FAIL", 2
+    apply_op(doc, {"op": "set_check", "id": "api", "check": "npm test -- payments"})
+    assert (api.status, api.check_exit, api.check_output) == ("doing", None, "")
+    # The same check again keeps the result it has.
+    api.status = "done"
+    apply_op(doc, {"op": "set_check", "id": "api", "check": "npm test -- payments"})
+    assert api.status == "done"
+
+
 def test_unknown_op() -> None:
     with pytest.raises(CanvasError, match="unknown op"):
         apply_op(make_doc(), {"op": "explode"})
