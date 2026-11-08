@@ -117,10 +117,11 @@ NEXT_SCHEMA: dict[str, Any] = {
 
 
 class CanvasTools:
-    def __init__(self, runtime: CanvasRuntime, default_root: Callable[[], str] | None = None) -> None:
+    def __init__(self, runtime: CanvasRuntime, default_root: Callable[[], str]) -> None:
+        """`default_root` returns the calling session's working directory (`ctx.session_cwd`)."""
         self.runtime = runtime
         self.store = runtime.store
-        self._default_root = default_root or _default_root
+        self._default_root = default_root
 
     def specs(self) -> list[tuple[dict[str, Any], Callable[..., str]]]:
         return [
@@ -288,10 +289,3 @@ def _respond(run: Callable[[], dict[str, Any]]) -> str:
         return json.dumps(run(), ensure_ascii=False)
     except CanvasError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
-
-
-def _default_root() -> str:
-    env_root = os.environ.get("TERMINAL_CWD", "")
-    if env_root and os.path.isabs(os.path.expanduser(env_root)):
-        return env_root
-    return os.getcwd()

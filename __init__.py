@@ -60,7 +60,9 @@ def register(ctx: Any) -> None:
 
     runtime = ensure_runtime()
     hooks = CanvasHooks(runtime)
-    tools = CanvasTools(runtime)
+    # The session's own folder: under a shared gateway, os.getcwd() and TERMINAL_CWD are the
+    # gateway's or another profile's.
+    tools = CanvasTools(runtime, default_root=ctx.session_cwd)
 
     for schema, handler in tools.specs():
         ctx.register_tool(name=schema["name"], toolset=TOOLSET, schema=schema, handler=handler, emoji="🗺️")
