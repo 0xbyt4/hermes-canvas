@@ -24,6 +24,19 @@ MAX_FILE_BYTES = 512_000
 MAX_DIFF_CHARS = 20_000
 TIMEOUT_S = 5
 GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.quotepath=off")
+# Git gets only these from the gateway's environment. Other variables (`GIT_DIR`, `GIT_CONFIG_*`,
+# provider keys) could point git elsewhere or reach a program the repository runs. `HOME`,
+# `XDG_CONFIG_HOME` and `USERPROFILE` locate the user's global git config (`safe.directory`), and
+# Windows needs `SYSTEMROOT` to start git.
+GIT_ENV_KEEP = ("PATH", "HOME", "LANG", "XDG_CONFIG_HOME", "SYSTEMROOT", "USERPROFILE")
+GIT_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_LITERAL_PATHSPECS": "1",
+    # A promisor remote in .git/config would fetch missing objects with a command the repository
+    # chooses (`ext::` URLs).
+    "GIT_NO_LAZY_FETCH": "1",
+}
 
 
 @dataclass(frozen=True)
@@ -132,15 +145,7 @@ def _git(base: Path, *args: str, text: bool = True) -> str | bytes | None:
             capture_output=True,
             timeout=TIMEOUT_S,
             check=False,
-            env={
-                **os.environ,
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_OPTIONAL_LOCKS": "0",
-                "GIT_LITERAL_PATHSPECS": "1",
-                # A promisor remote in .git/config would fetch missing objects with a command
-                # the repository chooses (`ext::` URLs).
-                "GIT_NO_LAZY_FETCH": "1",
-            },
+            env={**{k: os.environ[k] for k in GIT_ENV_KEEP if k in os.environ}, **GIT_ENV},
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("hermes-canvas: git %s failed: %s", args[0], exc)

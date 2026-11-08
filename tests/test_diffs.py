@@ -85,6 +85,21 @@ def test_repository_commands_never_run(repo: Path) -> None:
     assert not marker.exists()
 
 
+def test_the_gateway_environment_cannot_point_git_elsewhere(
+    repo: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = tmp_path_factory.mktemp("other")
+    git(other, "init", "-q")
+    (other / "src").mkdir()
+    (other / "src/cart.ts").write_text("export const a = 2\n")
+    git(other, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "add", ".")
+    git(other, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "x")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    (repo / "src/cart.ts").write_text("export const a = 2\n")
+    [d] = box_diffs(str(repo), ["src/cart.ts"])
+    assert d["status"] == "modified" and "-export const a = 1" in d["diff"]
+
+
 def test_pathspec_magic_cannot_reach_outside_a_subfolder_root(repo: Path) -> None:
     (repo / "top-secret.txt").write_text("secret\n")
     (repo / "app").mkdir()
