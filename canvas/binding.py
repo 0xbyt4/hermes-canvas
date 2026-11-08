@@ -75,50 +75,108 @@ def check_globs(check: str) -> list[str]:
     return globs
 
 
-def glob_to_regex(pattern: str) -> re.Pattern[str]:
-    """Compile a project-relative glob.
+# Edge labels of a glob automaton: one literal character, any character but `/`, or any character.
+_NOT_SLASH = "\0notslash"
+_ANY = "\0any"
+
+
+class Glob:
+    """A compiled project-relative glob, matched in time linear in the path length.
 
     - `**` spans directories; `*` and `?` stay inside one path segment.
     - `{a,b}` matches either alternative (no nesting).
     - A pattern that ends with `/`, or has no wildcard at all, also matches everything under it,
       so `src/payments`, `src/payments/` and `src/{api,ui}` cover the files under them.
+
+    Globs come from the model's plan and run on every write in `pre_tool_call`, so matching must
+    not backtrack: a regex with many `.*` takes exponential time on a path that almost matches.
+    This is a Thompson automaton, stepped over the path once with the set of live states.
     """
-    pattern = pattern.strip()
-    while pattern.startswith("./"):
-        pattern = pattern[2:]
-    if pattern.endswith("/"):
-        pattern += "**"
-    body = _translate(pattern)
-    if not _WILDCARDS & set(pattern):
-        body += "(?:/.*)?"
-    return re.compile(body + r"\Z")
 
+    def __init__(self, pattern: str) -> None:
+        pattern = pattern.strip()
+        while pattern.startswith("./"):
+            pattern = pattern[2:]
+        if pattern.endswith("/"):
+            pattern += "**"
+        self._edges: list[list[tuple[str, int]]] = []
+        self._eps: list[list[int]] = []
+        start = self._state()
+        end = self._build(pattern, start)
+        self._accept = {end}
+        if not _WILDCARDS & set(pattern):
+            under = self._state()
+            self._edges[end].append(("/", under))
+            self._edges[under].append((_ANY, under))
+            self._accept.add(under)
+        self._closure = [self._close(s) for s in range(len(self._eps))]
+        self._start = self._closure[start]
 
-def _translate(pattern: str) -> str:
-    out: list[str] = []
-    i = 0
-    while i < len(pattern):
-        if pattern.startswith("**/", i):
-            out.append("(?:.*/)?")
-            i += 3
-        elif pattern.startswith("**", i):
-            out.append(".*")
-            i += 2
-        elif pattern[i] == "*":
-            out.append("[^/]*")
-            i += 1
-        elif pattern[i] == "?":
-            out.append("[^/]")
-            i += 1
-        elif pattern[i] == "{" and "}" in pattern[i:]:
-            end = pattern.index("}", i)
-            options = pattern[i + 1 : end].split(",")
-            out.append("(?:" + "|".join(_translate(o) for o in options) + ")")
-            i = end + 1
-        else:
-            out.append(re.escape(pattern[i]))
-            i += 1
-    return "".join(out)
+    def match(self, path: str) -> bool:
+        live = self._start
+        for ch in path:
+            step: set[int] = set()
+            for state in live:
+                for label, target in self._edges[state]:
+                    if label in (ch, _ANY) or (label == _NOT_SLASH and ch != "/"):
+                        step |= self._closure[target]
+            if not step:
+                return False
+            live = frozenset(step)
+        return not live.isdisjoint(self._accept)
+
+    def _state(self) -> int:
+        self._edges.append([])
+        self._eps.append([])
+        return len(self._edges) - 1
+
+    def _loop(self, state: int, label: str) -> int:
+        """`label*` from `state`: a self loop, then an empty step to a new state."""
+        self._edges[state].append((label, state))
+        nxt = self._state()
+        self._eps[state].append(nxt)
+        return nxt
+
+    def _build(self, pattern: str, state: int) -> int:
+        i = 0
+        while i < len(pattern):
+            if pattern.startswith("**/", i):
+                # Zero or more whole directories: skip, or anything that ends with `/`.
+                nxt, inner = self._state(), self._state()
+                self._eps[state] += [nxt, inner]
+                self._edges[inner] += [(_ANY, inner), ("/", nxt)]
+                state, i = nxt, i + 3
+            elif pattern.startswith("**", i):
+                state, i = self._loop(state, _ANY), i + 2
+            elif pattern[i] == "*":
+                state, i = self._loop(state, _NOT_SLASH), i + 1
+            elif pattern[i] == "{" and "}" in pattern[i:]:
+                end = pattern.index("}", i)
+                nxt = self._state()
+                for option in pattern[i + 1 : end].split(","):
+                    self._eps[self._build(option, self._branch(state))].append(nxt)
+                state, i = nxt, end + 1
+            else:
+                label = _NOT_SLASH if pattern[i] == "?" else pattern[i]
+                nxt = self._state()
+                self._edges[state].append((label, nxt))
+                state, i = nxt, i + 1
+        return state
+
+    def _branch(self, state: int) -> int:
+        branch = self._state()
+        self._eps[state].append(branch)
+        return branch
+
+    def _close(self, state: int) -> frozenset[int]:
+        seen = {state}
+        todo = [state]
+        while todo:
+            for nxt in self._eps[todo.pop()]:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    todo.append(nxt)
+        return frozenset(seen)
 
 
 def _real(path: str) -> str:
@@ -250,10 +308,10 @@ class Binding:
     doc_id: str
     root: str
     revision: int
-    active: list[tuple[str, list[re.Pattern[str]]]] = field(default_factory=list)
+    active: list[tuple[str, list[Glob]]] = field(default_factory=list)
     components: set[str] = field(default_factory=set)
-    removed: list[tuple[str, list[re.Pattern[str]]]] = field(default_factory=list)
-    removed_tests: list[tuple[str, list[re.Pattern[str]]]] = field(default_factory=list)
+    removed: list[tuple[str, list[Glob]]] = field(default_factory=list)
+    removed_tests: list[tuple[str, list[Glob]]] = field(default_factory=list)
     checks: list[tuple[str, str]] = field(default_factory=list)
 
     @classmethod
@@ -266,15 +324,15 @@ class Binding:
             if not box.removed and box.kind in ("component", "drift"):
                 if not box.files and not extra:
                     continue
-                binding.active.append((box.id, [glob_to_regex(g) for g in [*box.files, *extra]]))
+                binding.active.append((box.id, [Glob(g) for g in [*box.files, *extra]]))
                 if box.kind == "component":
                     binding.components.add(box.id)
             elif box.removed and box.kind == "component":
                 if box.files:
-                    binding.removed.append((box.id, [glob_to_regex(g) for g in box.files]))
+                    binding.removed.append((box.id, [Glob(g) for g in box.files]))
                 tests = [g for g in check_globs(box.check) if g not in claimed and g not in box.files]
                 if tests:
-                    binding.removed_tests.append((box.id, [glob_to_regex(g) for g in tests]))
+                    binding.removed_tests.append((box.id, [Glob(g) for g in tests]))
         for box in doc.active_boxes():
             if box.check:
                 binding.checks.append((box.id, normalize_command(box.check)))

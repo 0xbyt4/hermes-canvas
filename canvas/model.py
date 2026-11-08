@@ -17,6 +17,7 @@ STATUSES = ("todo", "doing", "done", "failed")
 MAX_TEXT = 4000
 MAX_WRITTEN = 20
 MAX_LIST = 50
+MAX_GLOB = 256
 MAX_COORD = 100_000
 MAX_NOTE = 500  # board units; the pane draws boxes about 200 wide
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -72,6 +73,14 @@ def _str_list(value: Any, name: str) -> list[str]:
     return items
 
 
+def _globs(value: Any) -> list[str]:
+    globs = _str_list(value, "files")
+    for glob in globs:
+        if len(glob) > MAX_GLOB:
+            raise CanvasError(f"file glob is longer than {MAX_GLOB} characters: {glob[:40]!r}...")
+    return globs
+
+
 def _box_id(value: Any) -> str:
     box_id = _text(value, "id", limit=64, required=True)
     if not ID_RE.match(box_id):
@@ -122,7 +131,7 @@ class Box:
             id=_box_id(raw.get("id")),
             label=_line(raw.get("label"), "label", required=True),
             kind=kind,
-            files=_str_list(raw.get("files"), "files"),
+            files=_globs(raw.get("files")),
             check=_text(raw.get("check"), "check", limit=500),
             after=_str_list(raw.get("after"), "after"),
             options=[_line(o, "options") for o in _str_list(raw.get("options"), "options")],
@@ -313,7 +322,7 @@ def _op_rename(doc: Doc, op: dict[str, Any]) -> str:
 
 def _op_set_files(doc: Doc, op: dict[str, Any]) -> str:
     box = doc.require(_box_id(op.get("id")))
-    box.files = _str_list(op.get("files"), "files")
+    box.files = _globs(op.get("files"))
     return f"set files of {box.id}"
 
 

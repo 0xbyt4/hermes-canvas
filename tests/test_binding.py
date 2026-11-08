@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 from helpers import SHOP_PLAN, plan
 
 from canvas.binding import (
     Binding,
+    Glob,
     check_globs,
-    glob_to_regex,
     goal_tag,
     normalize_command,
     normalize_globs,
@@ -42,10 +44,24 @@ from canvas.shell import code_paths, shell_write_paths
         ("src/payments", "src/paymentsx/a.ts", False),
         ("src/{api,ui}", "src/api/x.ts", True),
         ("src/{api,ui}", "src/ui", True),
+        ("src/**/a.ts", "src/a.ts", True),
+        ("src/**/a.ts", "src/x/y/a.ts", True),
+        ("src/**/a.ts", "src/xa.ts", False),
+        ("**", "a/b/c", True),
+        ("src/{a,**/b}.ts", "src/x/y/b.ts", True),
     ],
 )
-def test_glob_to_regex(pattern: str, path: str, expected: bool) -> None:
-    assert bool(glob_to_regex(pattern).match(path)) is expected
+def test_glob(pattern: str, path: str, expected: bool) -> None:
+    assert Glob(pattern).match(path) is expected
+
+
+def test_glob_matching_does_not_backtrack() -> None:
+    # The plan's globs run on every write. A backtracking regex took 18 s for 8 repeats on 60 chars.
+    glob = Glob("**a" * 12 + "b")
+    path = "a" * 200
+    start = time.perf_counter()
+    assert glob.match(path) is False
+    assert time.perf_counter() - start < 0.05
 
 
 @pytest.mark.parametrize(

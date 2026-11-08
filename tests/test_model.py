@@ -24,6 +24,7 @@ def test_from_plan_infers_question_kind() -> None:
         ({"id": "a", "label": ""}, "label is required"),
         ({"id": "a", "label": "x", "kind": "blob"}, "kind must be one of"),
         ({"id": "a", "label": "x", "files": [1]}, "list of strings"),
+        ({"id": "a", "label": "x", "files": ["src/" + "a" * 253]}, "longer than 256"),
     ],
 )
 def test_from_plan_rejects_bad_input(raw: dict, message: str) -> None:
