@@ -138,3 +138,27 @@ test('the app name and the key UI copy are translated to Chinese', () => {
   assert.equal(zh.translate('status.shipped'), '已交付：每个盒子都通过了检查')
   assert.equal(zh.translate('card.hint'), '在画布上调整计划：编辑会立即送达智能体。')
 })
+
+test('JSX copy uses the reactive hook; module-level code uses the non-reactive tr', () => {
+  // ctx.i18n.t (our `tr`) is non-reactive: a language switch re-renders React
+  // trees but does not re-run module-level code. Every component that renders
+  // a translated string must therefore use the reactive `usePluginI18n` hook;
+  // only module-level functions (status labels, pane registration) may use `tr`.
+  const blocks = SOURCE.split(/(?=^function [A-Z]|^export default \{)/m)
+
+  for (const block of blocks) {
+    if (!/^function [A-Z]/.test(block)) continue
+    const usesT = /\bt\(/.test(block)
+    const hasHook = /usePluginI18n\('hermes-canvas'\)/.test(block)
+
+    assert.ok(!usesT || hasHook,
+      `a React component uses t() without usePluginI18n: ${block.split('\n')[0]}`)
+  }
+
+  // The pane registration and plugin name are evaluated outside React, so
+  // they must use the non-reactive translator or the pane fails to load.
+  assert.match(SOURCE, /name: tr\('app.name'\)/)
+  assert.match(SOURCE, /title: tr\('pane.title'\)/)
+  assert.doesNotMatch(SOURCE, /name: t\('app.name'\)/)
+  assert.doesNotMatch(SOURCE, /title: t\('pane.title'\)/)
+})

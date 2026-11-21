@@ -8,7 +8,7 @@
 // - The ::hermes-canvas{id="cv-..."} transcript directive renders a small status card in chat.
 //
 // Plain ESM loaded uncompiled by Hermes Desktop: no JSX, and only the three allowed imports.
-import { host, useValue, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
+import { host, usePluginI18n, useValue, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -884,6 +884,7 @@ function subLine(box) {
 
 // `born` is the draw-on delay in seconds for a box that just appeared, else undefined.
 function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick, onAnswer }) {
+  const t = usePluginI18n('hermes-canvas')
   const { w, h } = pos
   const state = boxState(box)
   const drawing = born !== undefined
@@ -954,7 +955,7 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
         {
           className: 'hc-notetag',
           transform: 'translate(-8 -11) rotate(-4)',
-          children: [jsx('rect', { width: 40, height: 17, rx: 2 }), jsx('text', { x: 20, y: 12.5, textAnchor: 'middle', children: tr('detail.note') })]
+          children: [jsx('rect', { width: 40, height: 17, rx: 2 }), jsx('text', { x: 20, y: 12.5, textAnchor: 'middle', children: t('detail.note') })]
         },
         'note'
       )
@@ -1176,6 +1177,7 @@ function DiffBody({ text }) {
 
 // Loads the git diff of the files the box wrote. Reloads when the box gets a new write.
 function Changes({ canvasId, box }) {
+  const t = usePluginI18n('hermes-canvas')
   const [open, setOpen] = useState(false)
   const [state, setState] = useState({ key: '', files: null, error: '' })
   const key = `${canvasId}|${box.id}|${box.writes}`
@@ -1199,16 +1201,16 @@ function Changes({ canvasId, box }) {
       jsxs('div', {
         className: 'hc-file',
         children: [
-          jsx('div', { className: 'hc-k', style: { flex: 1 }, children: tr('diff.title') }),
+          jsx('div', { className: 'hc-k', style: { flex: 1 }, children: t('diff.title') }),
           jsx('button', {
             type: 'button',
             className: 'hc-btn',
             onClick: () => setOpen(v => !v),
-            children: open ? tr('diff.hide') : tr('diff.show')
+            children: open ? t('diff.hide') : t('diff.show')
           })
         ]
       }),
-      open && loading ? jsx('span', { className: 'hc-meta', children: tr('diff.loading') }) : null,
+      open && loading ? jsx('span', { className: 'hc-meta', children: t('diff.loading') }) : null,
       open && state.error ? jsx('span', { className: 'hc-error', children: state.error }) : null,
       ...(open && !loading && state.files
         ? state.files.map(f =>
@@ -1228,7 +1230,7 @@ function Changes({ canvasId, box }) {
                     : f.status === 'error' && f.diff
                       ? jsx('span', { className: 'hc-meta', children: f.diff })
                       : null,
-                  f.truncated ? jsx('span', { className: 'hc-meta', children: tr('diff.truncated') }) : null
+                  f.truncated ? jsx('span', { className: 'hc-meta', children: t('diff.truncated') }) : null
                 ]
               },
               f.path
@@ -1240,6 +1242,7 @@ function Changes({ canvasId, box }) {
 }
 
 function NoteEditor({ box, busy, onSave }) {
+  const t = usePluginI18n('hermes-canvas')
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(box.note || '')
   useEffect(() => {
@@ -1261,7 +1264,7 @@ function NoteEditor({ box, busy, onSave }) {
           className: 'hc-btn',
           disabled: busy,
           onClick: () => setEditing(true),
-          children: box.note ? tr('note.edit') : tr('note.add')
+          children: box.note ? t('note.edit') : t('note.add')
         })
       ]
     })
@@ -1280,8 +1283,8 @@ function NoteEditor({ box, busy, onSave }) {
         value: draft,
         maxLength: 500,
         autoFocus: true,
-        placeholder: tr('note.placeholder'),
-        'aria-label': tr('note.aria'),
+        placeholder: t('note.placeholder'),
+        'aria-label': t('note.aria'),
         onChange: e => setDraft(e.target.value),
         onKeyDown: e => {
           if (e.key === 'Escape') setEditing(false)
@@ -1294,9 +1297,9 @@ function NoteEditor({ box, busy, onSave }) {
       jsxs('div', {
         className: 'hc-row',
         children: [
-          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || draft.trim() === (box.note || ''), children: tr('note.save') }),
-          box.note ? jsx('button', { type: 'button', className: 'hc-btn danger', disabled: busy, onClick: () => save(''), children: tr('note.clear') }) : null,
-          jsx('button', { type: 'button', className: 'hc-btn', onClick: () => setEditing(false), children: tr('detail.cancel') })
+          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || draft.trim() === (box.note || ''), children: t('note.save') }),
+          box.note ? jsx('button', { type: 'button', className: 'hc-btn danger', disabled: busy, onClick: () => save(''), children: t('note.clear') }) : null,
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: () => setEditing(false), children: t('detail.cancel') })
         ]
       })
     ]
@@ -1319,6 +1322,7 @@ function Detail({
   onUnlink,
   onNote
 }) {
+  const t = usePluginI18n('hermes-canvas')
   const [draft, setDraft] = useState(box.label)
   const inputRef = useRef(null)
   // A poll can change the label while the user types: keep the draft until renaming ends.
@@ -1333,16 +1337,16 @@ function Detail({
   }, [renaming])
   const state = boxState(box)
   const rows = []
-  if (box.owner) rows.push([tr('detail.builtBy'), jsx('span', { children: `${ownerName(box.owner)} (${box.owner})` })])
-  if (box.files && box.files.length) rows.push([tr('detail.files'), jsx('span', { className: 'hc-mono', children: box.files.join('  ') })])
-  if (box.check) rows.push([tr('detail.check'), jsx('span', { className: 'hc-mono', children: box.check })])
+  if (box.owner) rows.push([t('detail.builtBy'), jsx('span', { children: `${ownerName(box.owner)} (${box.owner})` })])
+  if (box.files && box.files.length) rows.push([t('detail.files'), jsx('span', { className: 'hc-mono', children: box.files.join('  ') })])
+  if (box.check) rows.push([t('detail.check'), jsx('span', { className: 'hc-mono', children: box.check })])
   if (box.written && box.written.length) {
-    rows.push([tr('detail.written'), jsx('span', { className: 'hc-mono', children: box.written.slice(-6).join('  ') })])
+    rows.push([t('detail.written'), jsx('span', { className: 'hc-mono', children: box.written.slice(-6).join('  ') })])
   }
-  if (box.blocked) rows.push([tr('detail.blockedWrites'), jsx('span', { children: String(box.blocked) })])
+  if (box.blocked) rows.push([t('detail.blockedWrites'), jsx('span', { children: String(box.blocked) })])
   if (box.after && box.after.length) {
     rows.push([
-      tr('detail.waitsFor'),
+      t('detail.waitsFor'),
       jsx('div', {
         children: box.after.map(dep =>
           jsxs(
@@ -1354,7 +1358,7 @@ function Detail({
                 jsx('button', {
                   type: 'button',
                   disabled: busy,
-                  title: tr('detail.releaseDep', labels.get(dep) || dep),
+                  title: t('detail.releaseDep', labels.get(dep) || dep),
                   'aria-label': `Remove the dependency on ${labels.get(dep) || dep}`,
                   onClick: () => onUnlink(dep),
                   children: '×'
@@ -1368,7 +1372,7 @@ function Detail({
     ])
   }
   if (box.kind === 'question') {
-    rows.push([tr('detail.answer'), jsx('span', { children: box.answer || tr('detail.notAnswered') })])
+    rows.push([t('detail.answer'), jsx('span', { children: box.answer || t('detail.notAnswered') })])
   }
   const head = renaming
     ? jsxs('form', {
@@ -1383,14 +1387,14 @@ function Detail({
             className: 'hc-input',
             value: draft,
             maxLength: 200,
-            'aria-label': tr('detail.boxName'),
+            'aria-label': t('detail.boxName'),
             onChange: e => setDraft(e.target.value),
             onKeyDown: e => {
               if (e.key === 'Escape') onCancelRename()
             }
           }),
-          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || !draft.trim(), children: tr('detail.save') }),
-          jsx('button', { type: 'button', className: 'hc-btn', onClick: onCancelRename, children: tr('detail.cancel') })
+          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || !draft.trim(), children: t('detail.save') }),
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onCancelRename, children: t('detail.cancel') })
         ]
       })
     : jsxs('div', {
@@ -1399,7 +1403,7 @@ function Detail({
           jsx('span', { className: 'hc-detail-title', children: box.label }),
           jsx('span', { className: `hc-chip ${state}`, children: statusText(state) }),
           box.kind !== 'drift'
-            ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onStartRename, children: tr('detail.rename') })
+            ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onStartRename, children: t('detail.rename') })
             : null,
           box.kind === 'drift' && !box.removed
             ? jsx('button', {
@@ -1407,25 +1411,25 @@ function Detail({
                 className: 'hc-btn',
                 disabled: busy,
                 onClick: onAdopt,
-                title: tr('detail.keepFile'),
-                children: tr('detail.addToPlan')
+                title: t('detail.keepFile'),
+                children: t('detail.addToPlan')
               })
             : null,
           box.kind === 'drift' && !box.removed
             ? box.revert_asked
-              ? jsx('span', { className: 'hc-chip', title: tr('detail.undoTip'), children: tr('detail.undoAsked') })
+              ? jsx('span', { className: 'hc-chip', title: t('detail.undoTip'), children: t('detail.undoAsked') })
               : jsx('button', {
                   type: 'button',
                   className: 'hc-btn',
                   disabled: busy,
                   onClick: onRevert,
-                  title: tr('detail.revertTip'),
-                  children: tr('detail.revert')
+                  title: t('detail.revertTip'),
+                  children: t('detail.revert')
                 })
             : null,
           box.removed
-            ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onRestore, children: tr('detail.restore') })
-            : jsx('button', { type: 'button', className: 'hc-btn danger', disabled: busy, onClick: onRemove, children: tr('detail.remove') })
+            ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onRestore, children: t('detail.restore') })
+            : jsx('button', { type: 'button', className: 'hc-btn danger', disabled: busy, onClick: onRemove, children: t('detail.remove') })
         ]
       })
   const output = box.check_output
@@ -1441,7 +1445,7 @@ function Detail({
       ),
       output
         ? jsxs('div', {
-            children: [jsx('div', { className: 'hc-k', children: tr('detail.checkOutput', box.check_exit) }), output]
+            children: [jsx('div', { className: 'hc-k', children: t('detail.checkOutput', box.check_exit) }), output]
           })
         : null,
       jsx(Changes, { canvasId, box })
@@ -1493,6 +1497,7 @@ async function copyMermaid(doc) {
 const FINALE_MS = 3600
 
 function Finale() {
+  const t = usePluginI18n('hermes-canvas')
   const r = mulberry(7)
   const colors = ['var(--hc-done)', 'var(--hc-doing)', 'var(--hc-note)', 'var(--hc-accent)', 'var(--hc-fail)']
   const bits = Array.from({ length: 46 }, (_, i) => ({
@@ -1523,7 +1528,7 @@ function Finale() {
           i
         )
       ),
-      jsx('b', { children: tr('finale.shipped') })
+      jsx('b', { children: t('finale.shipped') })
     ]
   })
 }
@@ -1531,6 +1536,7 @@ function Finale() {
 /* ---------- history ---------- */
 
 function HistoryBar({ list, n, latest, playing, onPick, onPlay, onClose }) {
+  const t = usePluginI18n('hermes-canvas')
   const item = list.find(h => h.revision === n)
   const when = item ? new Date(item.at * 1000).toLocaleTimeString() : ''
   return jsxs('div', {
@@ -1539,7 +1545,7 @@ function HistoryBar({ list, n, latest, playing, onPick, onPlay, onClose }) {
       jsxs('div', {
         className: 'hc-row',
         children: [
-          jsx('button', { type: 'button', className: 'hc-btn', onClick: onPlay, children: playing ? tr('history.pause') : tr('history.play') }),
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onPlay, children: playing ? t('history.pause') : t('history.play') }),
           jsx('input', {
             type: 'range',
             className: 'hc-range',
@@ -1547,17 +1553,17 @@ function HistoryBar({ list, n, latest, playing, onPick, onPlay, onClose }) {
             max: latest,
             step: 1,
             value: n,
-            'aria-label': tr('history.revision'),
+            'aria-label': t('history.revision'),
             onChange: e => onPick(Number(e.target.value))
           }),
           jsx('span', { className: 'hc-meta', children: `rev ${n}/${latest}` }),
-          jsx('button', { type: 'button', className: 'hc-btn', onClick: onClose, children: tr('history.live') })
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onClose, children: t('history.live') })
         ]
       }),
       item
         ? jsx('span', {
             className: 'hc-meta',
-            children: `${item.author === 'user' ? tr('history.author.user') : item.author === 'agent' ? tr('history.author.agent') : tr('history.author.hooks')} · ${when} · ${item.reason}`
+            children: `${item.author === 'user' ? t('history.author.user') : item.author === 'agent' ? t('history.author.agent') : t('history.author.hooks')} · ${when} · ${item.reason}`
           })
         : null
     ]
@@ -1580,6 +1586,7 @@ function slugId(label, boxes) {
 }
 
 function AddBox({ after, busy, onAdd, onCancel }) {
+  const t = usePluginI18n('hermes-canvas')
   const [label, setLabel] = useState('')
   return jsxs('form', {
     className: 'hc-detail',
@@ -1588,7 +1595,7 @@ function AddBox({ after, busy, onAdd, onCancel }) {
       if (label.trim()) onAdd(label.trim())
     },
     children: [
-      jsx('div', { className: 'hc-k', children: after ? tr('add.newAfter', after.label) : tr('add.new') }),
+      jsx('div', { className: 'hc-k', children: after ? t('add.newAfter', after.label) : t('add.new') }),
       jsxs('div', {
         className: 'hc-row',
         children: [
@@ -1597,18 +1604,18 @@ function AddBox({ after, busy, onAdd, onCancel }) {
             value: label,
             maxLength: 200,
             autoFocus: true,
-            placeholder: tr('add.placeholder'),
-            'aria-label': tr('add.nameAria'),
+            placeholder: t('add.placeholder'),
+            'aria-label': t('add.nameAria'),
             onChange: e => setLabel(e.target.value),
             onKeyDown: e => {
               if (e.key === 'Escape') onCancel()
             }
           }),
-          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || !label.trim(), children: tr('add.submit') }),
-          jsx('button', { type: 'button', className: 'hc-btn', onClick: onCancel, children: tr('detail.cancel') })
+          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || !label.trim(), children: t('add.submit') }),
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onCancel, children: t('detail.cancel') })
         ]
       }),
-      jsx('span', { className: 'hc-meta', children: tr('add.hint') })
+      jsx('span', { className: 'hc-meta', children: t('add.hint') })
     ]
   })
 }
@@ -1655,6 +1662,7 @@ function useSessionId() {
 }
 
 function CanvasPane() {
+  const t = usePluginI18n('hermes-canvas')
   const session = useSessionId()
   const visible = useValue(host.paneVisibility(PANE_ID))
   // Subscribed so that the pane redraws when the agent's turn starts or ends (the finish banner).
@@ -2104,7 +2112,7 @@ function CanvasPane() {
             children: [
               jsxs('div', {
                 children: [
-                  jsx('b', { children: tr('pane.noCanvas') }),
+                  jsx('b', { children: t('pane.noCanvas') }),
                   'Ask Hermes to plan the work first, for example: "Plan it on the canvas, then build it."',
                   error ? jsx('div', { className: 'hc-error', children: error }) : null
                 ]
@@ -2119,7 +2127,7 @@ function CanvasPane() {
   if (!doc) {
     return jsxs('div', {
       className: 'hc-root',
-      children: [jsx(Style, {}), jsx('div', { className: 'hc-board', children: jsx('div', { className: 'hc-empty', children: tr('pane.loading') }) })]
+      children: [jsx(Style, {}), jsx('div', { className: 'hc-board', children: jsx('div', { className: 'hc-empty', children: t('pane.loading') }) })]
     })
   }
 
@@ -2170,57 +2178,57 @@ function CanvasPane() {
       jsxs('div', {
         className: 'hc-head',
         children: [
-          jsx('span', { className: `hc-live${live ? '' : ' off'}`, title: live ? tr('pane.live') : tr('pane.polling') }),
+          jsx('span', { className: `hc-live${live ? '' : ' off'}`, title: live ? t('pane.live') : t('pane.polling') }),
           jsx('span', { className: 'hc-title', title: doc.title, children: doc.title }),
           jsx('span', { className: 'hc-meta', children: `${progress.done}/${progress.total} done · rev ${shown.revision}` }),
           jsx('button', {
             type: 'button',
             className: `hc-btn${past ? ' on hc-follow' : ''}`,
-            title: tr('pane.historyTip'),
+            title: t('pane.historyTip'),
             onClick: () => (past ? setHist(null) : openHistory()),
-            children: tr('pane.history')
+            children: t('pane.history')
           }),
           jsx('button', {
             type: 'button',
             className: 'hc-btn',
-            title: tr('pane.mermaidTip'),
+            title: t('pane.mermaidTip'),
             onClick: () => copyMermaid(shown),
-            children: tr('pane.mermaid')
+            children: t('pane.mermaid')
           }),
           jsx('button', {
             type: 'button',
             className: `hc-btn hc-follow${follow ? ' on' : ''}`,
             'aria-pressed': follow,
-            title: tr('pane.followTip'),
+            title: t('pane.followTip'),
             onClick: () => {
               saveFollow(!follow)
               setFollow(!follow)
               setFocus(null)
             },
-            children: tr('pane.follow')
+            children: t('pane.follow')
           }),
           jsx('button', {
             type: 'button',
             className: 'hc-btn',
             disabled: busy || past,
-            title: tr('pane.addBoxTip'),
+            title: t('pane.addBoxTip'),
             onClick: () => {
               setAdding(true)
               setRenaming(false)
             },
-            children: tr('pane.addBox')
+            children: t('pane.addBox')
           }),
           jsx('button', {
             type: 'button',
             className: `hc-btn hc-follow${linking ? ' on' : ''}`,
             'aria-pressed': linking,
             disabled: busy || past,
-            title: tr('pane.linkTip'),
+            title: t('pane.linkTip'),
             onClick: () => {
               setLink(null)
               setLinking(!linking)
             },
-            children: tr('pane.link')
+            children: t('pane.link')
           })
         ]
       }),
@@ -2351,7 +2359,7 @@ function CanvasPane() {
       showEdits && edits.length
         ? jsxs('div', {
             className: 'hc-edits-panel',
-            children: [jsx('div', { className: 'hc-k', children: tr('pane.yourEditsHover') }), jsx(EditList, { edits })]
+            children: [jsx('div', { className: 'hc-k', children: t('pane.yourEditsHover') }), jsx(EditList, { edits })]
           })
         : null,
       jsxs('div', {
@@ -2368,9 +2376,9 @@ function CanvasPane() {
                 type: 'button',
                 className: 'hc-textbtn',
                 'aria-expanded': showEdits,
-                title: tr('card.editsTip'),
+                title: t('card.editsTip'),
                 onClick: () => setShowEdits(!showEdits),
-                children: pending ? tr('card.editsWaiting', pending) : tr('card.yourEdits')
+                children: pending ? t('card.editsWaiting', pending) : t('card.yourEdits')
               })
             : null,
           error ? jsx('span', { className: 'hc-error', children: error }) : null
@@ -2417,6 +2425,7 @@ function useEdits(canvasId, key, limit) {
 }
 
 function EditList({ edits }) {
+  const t = usePluginI18n('hermes-canvas')
   if (!edits.length) return null
   return jsx('ul', {
     className: 'hc-edits',
@@ -2425,11 +2434,11 @@ function EditList({ edits }) {
         'li',
         {
           className: e.delivered_at ? 'got' : 'wait',
-          title: tr('edits.readTip', e.text),
+          title: t('edits.readTip', e.text),
           children: [
             jsx('span', { className: 'hc-edit-mark', 'aria-hidden': true, children: e.delivered_at ? '✓' : '…' }),
             jsx('span', { className: 'hc-edit-text', children: firstSentence(e.text) }),
-            jsx('span', { className: 'hc-edit-state', children: e.delivered_at ? tr('edits.delivered') : tr('edits.waiting') })
+            jsx('span', { className: 'hc-edit-state', children: e.delivered_at ? t('edits.delivered') : t('edits.waiting') })
           ]
         },
         e.id
@@ -2441,6 +2450,7 @@ function EditList({ edits }) {
 /* ---------- the chat card ---------- */
 
 function CanvasCard({ attrs, sessionId }) {
+  const t = usePluginI18n('hermes-canvas')
   const id = attrs && typeof attrs.id === 'string' ? attrs.id : ''
   const valid = CANVAS_ID_RE.test(id)
   const [doc, setDoc] = useState(null)
@@ -2452,7 +2462,7 @@ function CanvasCard({ attrs, sessionId }) {
     try {
       const res = await rest(`/canvas?id=${encodeURIComponent(id)}`)
       setDoc(res.canvas || null)
-      setError(res.canvas ? '' : tr('card.gone'))
+      setError(res.canvas ? '' : t('card.gone'))
     } catch (err) {
       setError(errorText(err))
     }
@@ -2481,7 +2491,7 @@ function CanvasCard({ attrs, sessionId }) {
   if (!doc) {
     return jsxs('div', {
       className: 'hc-root hc-card',
-      children: [jsx(Style, {}), jsx('span', { className: error ? 'hc-error' : 'hc-meta', children: error || tr('pane.loading') })]
+      children: [jsx(Style, {}), jsx('span', { className: error ? 'hc-error' : 'hc-meta', children: error || t('pane.loading') })]
     })
   }
   const progress = progressOf(doc)
@@ -2497,7 +2507,7 @@ function CanvasCard({ attrs, sessionId }) {
         className: 'hc-card-head',
         children: [
           jsx('span', { className: 'hc-title', children: doc.title }),
-          jsx('span', { className: 'hc-meta', children: tr('card.done', progress.done, progress.total) })
+          jsx('span', { className: 'hc-meta', children: t('card.done', progress.done, progress.total) })
         ]
       }),
       jsx('div', { className: 'hc-bar', children: jsx('i', { style: { width: `${pct}%` } }) }),
@@ -2524,16 +2534,16 @@ function CanvasCard({ attrs, sessionId }) {
           q.id
         )
       ),
-      edits.length ? jsx('div', { className: 'hc-k', children: tr('card.yourEdits') }) : null,
+      edits.length ? jsx('div', { className: 'hc-k', children: t('card.yourEdits') }) : null,
       jsx(EditList, { edits }),
       error ? jsx('span', { className: 'hc-error', children: error }) : null,
       jsxs('div', {
         className: 'hc-row',
         children: [
           typeof host.revealPane === 'function'
-            ? jsx('button', { type: 'button', className: 'hc-btn', onClick: revealPane, children: tr('card.open') })
+            ? jsx('button', { type: 'button', className: 'hc-btn', onClick: revealPane, children: t('card.open') })
             : null,
-          jsx('span', { className: 'hc-meta', children: tr('card.hint') })
+          jsx('span', { className: 'hc-meta', children: t('card.hint') })
         ]
       })
     ]
