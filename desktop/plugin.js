@@ -8,9 +8,234 @@
 // - The ::hermes-canvas{id="cv-..."} transcript directive renders a small status card in chat.
 //
 // Plain ESM loaded uncompiled by Hermes Desktop: no JSX, and only the three allowed imports.
-import { host, useValue, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
+import { host, usePluginI18n, useValue, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
+
+
+// ---------------------------------------------------------------------------
+// Copy. Every string the pane shows lives in MESSAGES and resolves against the
+// app's active locale (`display.language`), so Canvas reads in the same language
+// as the rest of Hermes. English is the fallback for any missing key, so an
+// untranslated string never leaves a hole. Adding a language is one more bundle.
+// ---------------------------------------------------------------------------
+const MESSAGES = {
+  en: {
+    'app.name': 'Hermes Canvas',
+    'pane.title': 'Canvas',
+    'status.shipped': 'Shipped: every box passed its check',
+    'status.questions': (n) => `${n} question${n === 1 ? '' : 's'} to answer`,
+    'status.failing': (n) => `${n} failing`,
+    'status.inProgress': (n) => `${n} in progress`,
+    'status.drift': (n) => `${n} file${n === 1 ? '' : 's'} outside the plan`,
+    'status.planned': 'Planned',
+    'status.todo': 'planned',
+    'status.doing': 'in progress',
+    'status.done': 'done',
+    'status.failed': 'failing',
+    'status.removed': 'removed',
+    'diff.title': 'Changes',
+    'diff.show': 'Show diff',
+    'diff.hide': 'Hide diff',
+    'diff.loading': 'Loading diff…',
+    'diff.truncated': 'Diff cut at 20,000 characters.',
+    'diff.modified': 'changed',
+    'diff.added': 'new file',
+    'diff.unchanged': 'no change since the last commit',
+    'diff.missing': 'deleted or not found',
+    'diff.outside': 'outside the project: not shown',
+    'diff.binary': 'binary file: not shown',
+    'diff.too_large': 'too large to show',
+    'diff.error': 'no diff',
+    'note.edit': 'Edit note',
+    'note.add': 'Add note for the agent',
+    'note.placeholder': 'For example: use the brand colors here',
+    'note.aria': 'Note for the agent',
+    'note.save': 'Save note',
+    'note.clear': 'Clear',
+    'detail.builtBy': 'Built by',
+    'detail.files': 'Files',
+    'detail.check': 'Check',
+    'detail.written': 'Written',
+    'detail.blockedWrites': 'Blocked writes',
+    'detail.waitsFor': 'Waits for',
+    'detail.releaseDep': (name) => `Let this box start without ${name}`,
+    'detail.answer': 'Answer',
+    'detail.notAnswered': 'not answered yet: pick an option on the box',
+    'detail.boxName': 'Box name',
+    'detail.save': 'Save',
+    'detail.cancel': 'Cancel',
+    'detail.rename': 'Rename',
+    'detail.addToPlan': 'Add to plan',
+    'detail.keepFile': 'Keep this file as part of the plan',
+    'detail.undoAsked': 'undo asked',
+    'detail.undoTip': 'The agent puts the file back, then removes this box',
+    'detail.revert': 'Revert',
+    'detail.revertTip': 'Ask the agent to put this file back as it was',
+    'detail.restore': 'Restore',
+    'detail.remove': 'Remove',
+    'detail.checkOutput': (code) => `Check output (exit ${code})`,
+    'detail.note': 'note',
+    'finale.shipped': 'Shipped',
+    'history.play': 'Play',
+    'history.pause': 'Pause',
+    'history.revision': 'Revision',
+    'history.live': 'Live',
+    'history.author.user': 'You',
+    'history.author.agent': 'Agent',
+    'history.author.hooks': 'Hooks',
+    'add.newAfter': (label) => `New box after "${label}"`,
+    'add.new': 'New box',
+    'add.placeholder': 'What should be built?',
+    'add.nameAria': 'New box name',
+    'add.submit': 'Add',
+    'add.hint': 'The agent picks its files and check, then builds it.',
+    'pane.noCanvas': 'No canvas in this chat yet',
+    'pane.loading': 'Loading canvas…',
+    'pane.live': 'Live updates',
+    'pane.polling': 'Polling for updates',
+    'pane.history': 'History',
+    'pane.historyTip': 'Replay how the plan changed',
+    'pane.mermaid': 'Mermaid',
+    'pane.mermaidTip': 'Copy the canvas as a Mermaid flowchart',
+    'pane.follow': 'Follow',
+    'pane.followTip': 'Move the view to the box that changes',
+    'pane.addBox': '+ Box',
+    'pane.addBoxTip': 'Add a box to the plan',
+    'pane.link': '→ Link',
+    'pane.linkTip': 'Draw an arrow from a box to a box that must wait for it',
+    'pane.yourEditsHover': 'Your edits · hover to see what the agent reads',
+    'card.gone': 'This canvas no longer exists.',
+    'card.done': (a, b) => `${a}/${b} done`,
+    'card.yourEdits': 'Your edits',
+    'card.editsTip': 'Show your edits and whether the agent got them',
+    'card.editsWaiting': (n) => `${n} edit${n === 1 ? '' : 's'} waiting for the agent`,
+    'card.open': 'Open canvas',
+    'card.hint': 'Steer the plan on the canvas: edits reach the agent at once.',
+    'edits.readTip': (text) => `The agent reads: ${text}`,
+    'edits.delivered': 'delivered',
+    'edits.waiting': 'waiting',
+  },
+  zh: {
+    'app.name': 'Hermes 画布',
+    'pane.title': '画布',
+    'status.shipped': '已交付：每个盒子都通过了检查',
+    'status.questions': (n) => `有 ${n} 个问题待回答`,
+    'status.failing': (n) => `${n} 个失败`,
+    'status.inProgress': (n) => `${n} 个进行中`,
+    'status.drift': (n) => `${n} 个文件在计划之外`,
+    'status.planned': '规划中',
+    'status.todo': '待规划',
+    'status.doing': '进行中',
+    'status.done': '已完成',
+    'status.failed': '失败',
+    'status.removed': '已移除',
+    'diff.title': '改动',
+    'diff.show': '显示差异',
+    'diff.hide': '隐藏差异',
+    'diff.loading': '正在加载差异…',
+    'diff.truncated': '差异已在 20,000 字符处截断。',
+    'diff.modified': '已修改',
+    'diff.added': '新文件',
+    'diff.unchanged': '自上次提交无变化',
+    'diff.missing': '已删除或未找到',
+    'diff.outside': '在项目之外：不显示',
+    'diff.binary': '二进制文件：不显示',
+    'diff.too_large': '过大，无法展示',
+    'diff.error': '无差异',
+    'note.edit': '编辑备注',
+    'note.add': '给智能体添加备注',
+    'note.placeholder': '例如：这里用品牌色',
+    'note.aria': '给智能体的备注',
+    'note.save': '保存备注',
+    'note.clear': '清除',
+    'detail.builtBy': '构建者',
+    'detail.files': '文件',
+    'detail.check': '检查',
+    'detail.written': '已写入',
+    'detail.blockedWrites': '被拦截的写入',
+    'detail.waitsFor': '等待',
+    'detail.releaseDep': (name) => `让此盒子不必等 ${name} 即可开始`,
+    'detail.answer': '回答',
+    'detail.notAnswered': '尚未回答：请在盒子上选择一个选项',
+    'detail.boxName': '盒子名称',
+    'detail.save': '保存',
+    'detail.cancel': '取消',
+    'detail.rename': '重命名',
+    'detail.addToPlan': '加入计划',
+    'detail.keepFile': '把此文件保留在计划中',
+    'detail.undoAsked': '已请求撤销',
+    'detail.undoTip': '智能体会把文件放回原样，然后移除此盒子',
+    'detail.revert': '还原',
+    'detail.revertTip': '让智能体把此文件恢复到原来的样子',
+    'detail.restore': '恢复',
+    'detail.remove': '移除',
+    'detail.checkOutput': (code) => `检查输出（退出码 ${code}）`,
+    'detail.note': '备注',
+    'finale.shipped': '已交付',
+    'history.play': '播放',
+    'history.pause': '暂停',
+    'history.revision': '版本',
+    'history.live': '实时',
+    'history.author.user': '你',
+    'history.author.agent': '智能体',
+    'history.author.hooks': '钩子',
+    'add.newAfter': (label) => `在「${label}」之后的新盒子`,
+    'add.new': '新盒子',
+    'add.placeholder': '要构建什么？',
+    'add.nameAria': '新盒子名称',
+    'add.submit': '添加',
+    'add.hint': '智能体会挑选文件和检查命令，然后构建它。',
+    'pane.noCanvas': '此对话还没有画布',
+    'pane.loading': '正在加载画布…',
+    'pane.live': '实时更新',
+    'pane.polling': '正在轮询更新',
+    'pane.history': '历史',
+    'pane.historyTip': '回放计划的变化过程',
+    'pane.mermaid': 'Mermaid',
+    'pane.mermaidTip': '把画布复制为 Mermaid 流程图',
+    'pane.follow': '跟随',
+    'pane.followTip': '把视图移到发生变化的盒子',
+    'pane.addBox': '+ 盒子',
+    'pane.addBoxTip': '向计划添加一个盒子',
+    'pane.link': '→ 连线',
+    'pane.linkTip': '画一条箭头，从某个盒子指向必须等待它的盒子',
+    'pane.yourEditsHover': '你的编辑 · 悬停查看智能体读到的内容',
+    'card.gone': '此画布已不存在。',
+    'card.done': (a, b) => `${a}/${b} 已完成`,
+    'card.yourEdits': '你的编辑',
+    'card.editsTip': '查看你的编辑以及智能体是否收到',
+    'card.editsWaiting': (n) => `有 ${n} 条编辑待智能体读取`,
+    'card.open': '打开画布',
+    'card.hint': '在画布上调整计划：编辑会立即送达智能体。',
+    'edits.readTip': (text) => `智能体读到：${text}`,
+    'edits.delivered': '已送达',
+    'edits.waiting': '等待中',
+  },
+}
+
+// Flatten a dotted-key message bundle into the tree Hermes expects.
+function messageTree(flat) {
+  const tree = {}
+  for (const [key, value] of Object.entries(flat)) {
+    const parts = key.split('.')
+    let node = tree
+    for (const part of parts.slice(0, -1)) {
+      node[part] = node[part] && typeof node[part] === 'object' ? node[part] : {}
+      node = node[part]
+    }
+    node[parts.at(-1)] = value
+  }
+  return tree
+}
+
+// Module-level translator: English fallback before register(), then the SDK's
+// locale-aware translator after register(). Use tr(key, ...args) everywhere so
+// strings work in helpers and non-React code too.
+let tr = (key, ...args) => {
+  const value = MESSAGES.en[key]
+  return typeof value === 'function' ? value(...args) : (value ?? key)
+}
 
 const PLUGIN_ID = 'hermes-canvas'
 const PANE_ID = `${PLUGIN_ID}:pane`
@@ -329,7 +554,8 @@ function edgePoint(a, b) {
 
 /* ---------- small helpers ---------- */
 
-const STATUS_TEXT = { todo: 'planned', doing: 'in progress', done: 'done', failed: 'failing', removed: 'removed' }
+const STATUS_KEYS = { todo: 'status.todo', doing: 'status.doing', done: 'status.done', failed: 'status.failed', removed: 'status.removed' }
+const statusText = (state) => tr(STATUS_KEYS[state] || state)
 
 function lastLine(text) {
   const lines = String(text || '')
@@ -364,13 +590,13 @@ function statusLine(doc) {
   const doing = parts.filter(b => b.status === 'doing').length
   const open = doc.boxes.filter(b => b.kind === 'question' && !b.removed && !b.answer).length
   const drift = doc.boxes.filter(b => b.kind === 'drift' && !b.removed).length
-  if (parts.length && parts.every(b => b.status === 'done')) return { text: 'Shipped: every box passed its check', tone: 'done' }
+  if (parts.length && parts.every(b => b.status === 'done')) return { text: tr('status.shipped'), tone: 'done' }
   const out = []
-  if (open) out.push(`${open} question${open === 1 ? '' : 's'} to answer`)
-  if (failed) out.push(`${failed} failing`)
-  if (doing) out.push(`${doing} in progress`)
-  if (drift) out.push(`${drift} file${drift === 1 ? '' : 's'} outside the plan`)
-  return { text: out.join(' · ') || 'Planned', tone: failed ? 'failed' : open ? 'ask' : '' }
+  if (open) out.push(tr('status.questions', open))
+  if (failed) out.push(tr('status.failing', failed))
+  if (doing) out.push(tr('status.inProgress', doing))
+  if (drift) out.push(tr('status.drift', drift))
+  return { text: out.join(' · ') || tr('status.planned'), tone: failed ? 'failed' : open ? 'ask' : '' }
 }
 
 function progressOf(doc) {
@@ -658,6 +884,7 @@ function subLine(box) {
 
 // `born` is the draw-on delay in seconds for a box that just appeared, else undefined.
 function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick, onAnswer }) {
+  const t = usePluginI18n('hermes-canvas')
   const { w, h } = pos
   const state = boxState(box)
   const drawing = born !== undefined
@@ -728,7 +955,7 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
         {
           className: 'hc-notetag',
           transform: 'translate(-8 -11) rotate(-4)',
-          children: [jsx('rect', { width: 40, height: 17, rx: 2 }), jsx('text', { x: 20, y: 12.5, textAnchor: 'middle', children: 'note' })]
+          children: [jsx('rect', { width: 40, height: 17, rx: 2 }), jsx('text', { x: 20, y: 12.5, textAnchor: 'middle', children: t('detail.note') })]
         },
         'note'
       )
@@ -917,16 +1144,17 @@ function continueTurn(ids, box, option) {
 
 /* ---------- detail strip for the selected box ---------- */
 
-const DIFF_STATUS = {
-  modified: 'changed',
-  added: 'new file',
-  unchanged: 'no change since the last commit',
-  missing: 'deleted or not found',
-  outside: 'outside the project: not shown',
-  binary: 'binary file: not shown',
-  too_large: 'too large to show',
-  error: 'no diff'
+const DIFF_KEYS = {
+  modified: 'diff.modified',
+  added: 'diff.added',
+  unchanged: 'diff.unchanged',
+  missing: 'diff.missing',
+  outside: 'diff.outside',
+  binary: 'diff.binary',
+  too_large: 'diff.too_large',
+  error: 'diff.error'
 }
+const diffStatus = (s) => tr(DIFF_KEYS[s] || s)
 
 function diffLineClass(line) {
   if (line.startsWith('@@')) return 'hunk'
@@ -949,6 +1177,7 @@ function DiffBody({ text }) {
 
 // Loads the git diff of the files the box wrote. Reloads when the box gets a new write.
 function Changes({ canvasId, box }) {
+  const t = usePluginI18n('hermes-canvas')
   const [open, setOpen] = useState(false)
   const [state, setState] = useState({ key: '', files: null, error: '' })
   const key = `${canvasId}|${box.id}|${box.writes}`
@@ -972,16 +1201,16 @@ function Changes({ canvasId, box }) {
       jsxs('div', {
         className: 'hc-file',
         children: [
-          jsx('div', { className: 'hc-k', style: { flex: 1 }, children: 'Changes' }),
+          jsx('div', { className: 'hc-k', style: { flex: 1 }, children: t('diff.title') }),
           jsx('button', {
             type: 'button',
             className: 'hc-btn',
             onClick: () => setOpen(v => !v),
-            children: open ? 'Hide diff' : 'Show diff'
+            children: open ? t('diff.hide') : t('diff.show')
           })
         ]
       }),
-      open && loading ? jsx('span', { className: 'hc-meta', children: 'Loading diff…' }) : null,
+      open && loading ? jsx('span', { className: 'hc-meta', children: t('diff.loading') }) : null,
       open && state.error ? jsx('span', { className: 'hc-error', children: state.error }) : null,
       ...(open && !loading && state.files
         ? state.files.map(f =>
@@ -993,7 +1222,7 @@ function Changes({ canvasId, box }) {
                     className: 'hc-file',
                     children: [
                       jsx('span', { className: 'hc-mono', style: { flex: 1 }, children: f.path }),
-                      jsx('span', { className: 'hc-chip', children: DIFF_STATUS[f.status] || f.status })
+                      jsx('span', { className: 'hc-chip', children: diffStatus(f.status) })
                     ]
                   }),
                   f.diff && (f.status === 'modified' || f.status === 'added' || f.status === 'missing')
@@ -1001,7 +1230,7 @@ function Changes({ canvasId, box }) {
                     : f.status === 'error' && f.diff
                       ? jsx('span', { className: 'hc-meta', children: f.diff })
                       : null,
-                  f.truncated ? jsx('span', { className: 'hc-meta', children: 'Diff cut at 20,000 characters.' }) : null
+                  f.truncated ? jsx('span', { className: 'hc-meta', children: t('diff.truncated') }) : null
                 ]
               },
               f.path
@@ -1013,6 +1242,7 @@ function Changes({ canvasId, box }) {
 }
 
 function NoteEditor({ box, busy, onSave }) {
+  const t = usePluginI18n('hermes-canvas')
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(box.note || '')
   useEffect(() => {
@@ -1034,7 +1264,7 @@ function NoteEditor({ box, busy, onSave }) {
           className: 'hc-btn',
           disabled: busy,
           onClick: () => setEditing(true),
-          children: box.note ? 'Edit note' : 'Add note for the agent'
+          children: box.note ? t('note.edit') : t('note.add')
         })
       ]
     })
@@ -1053,8 +1283,8 @@ function NoteEditor({ box, busy, onSave }) {
         value: draft,
         maxLength: 500,
         autoFocus: true,
-        placeholder: 'For example: use the brand colors here',
-        'aria-label': 'Note for the agent',
+        placeholder: t('note.placeholder'),
+        'aria-label': t('note.aria'),
         onChange: e => setDraft(e.target.value),
         onKeyDown: e => {
           if (e.key === 'Escape') setEditing(false)
@@ -1067,9 +1297,9 @@ function NoteEditor({ box, busy, onSave }) {
       jsxs('div', {
         className: 'hc-row',
         children: [
-          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || draft.trim() === (box.note || ''), children: 'Save note' }),
-          box.note ? jsx('button', { type: 'button', className: 'hc-btn danger', disabled: busy, onClick: () => save(''), children: 'Clear' }) : null,
-          jsx('button', { type: 'button', className: 'hc-btn', onClick: () => setEditing(false), children: 'Cancel' })
+          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || draft.trim() === (box.note || ''), children: t('note.save') }),
+          box.note ? jsx('button', { type: 'button', className: 'hc-btn danger', disabled: busy, onClick: () => save(''), children: t('note.clear') }) : null,
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: () => setEditing(false), children: t('detail.cancel') })
         ]
       })
     ]
@@ -1092,6 +1322,7 @@ function Detail({
   onUnlink,
   onNote
 }) {
+  const t = usePluginI18n('hermes-canvas')
   const [draft, setDraft] = useState(box.label)
   const inputRef = useRef(null)
   // A poll can change the label while the user types: keep the draft until renaming ends.
@@ -1106,16 +1337,16 @@ function Detail({
   }, [renaming])
   const state = boxState(box)
   const rows = []
-  if (box.owner) rows.push(['Built by', jsx('span', { children: `${ownerName(box.owner)} (${box.owner})` })])
-  if (box.files && box.files.length) rows.push(['Files', jsx('span', { className: 'hc-mono', children: box.files.join('  ') })])
-  if (box.check) rows.push(['Check', jsx('span', { className: 'hc-mono', children: box.check })])
+  if (box.owner) rows.push([t('detail.builtBy'), jsx('span', { children: `${ownerName(box.owner)} (${box.owner})` })])
+  if (box.files && box.files.length) rows.push([t('detail.files'), jsx('span', { className: 'hc-mono', children: box.files.join('  ') })])
+  if (box.check) rows.push([t('detail.check'), jsx('span', { className: 'hc-mono', children: box.check })])
   if (box.written && box.written.length) {
-    rows.push(['Written', jsx('span', { className: 'hc-mono', children: box.written.slice(-6).join('  ') })])
+    rows.push([t('detail.written'), jsx('span', { className: 'hc-mono', children: box.written.slice(-6).join('  ') })])
   }
-  if (box.blocked) rows.push(['Blocked writes', jsx('span', { children: String(box.blocked) })])
+  if (box.blocked) rows.push([t('detail.blockedWrites'), jsx('span', { children: String(box.blocked) })])
   if (box.after && box.after.length) {
     rows.push([
-      'Waits for',
+      t('detail.waitsFor'),
       jsx('div', {
         children: box.after.map(dep =>
           jsxs(
@@ -1127,7 +1358,7 @@ function Detail({
                 jsx('button', {
                   type: 'button',
                   disabled: busy,
-                  title: `Let this box start without ${labels.get(dep) || dep}`,
+                  title: t('detail.releaseDep', labels.get(dep) || dep),
                   'aria-label': `Remove the dependency on ${labels.get(dep) || dep}`,
                   onClick: () => onUnlink(dep),
                   children: '×'
@@ -1141,7 +1372,7 @@ function Detail({
     ])
   }
   if (box.kind === 'question') {
-    rows.push(['Answer', jsx('span', { children: box.answer || 'not answered yet: pick an option on the box' })])
+    rows.push([t('detail.answer'), jsx('span', { children: box.answer || t('detail.notAnswered') })])
   }
   const head = renaming
     ? jsxs('form', {
@@ -1156,23 +1387,23 @@ function Detail({
             className: 'hc-input',
             value: draft,
             maxLength: 200,
-            'aria-label': 'Box name',
+            'aria-label': t('detail.boxName'),
             onChange: e => setDraft(e.target.value),
             onKeyDown: e => {
               if (e.key === 'Escape') onCancelRename()
             }
           }),
-          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || !draft.trim(), children: 'Save' }),
-          jsx('button', { type: 'button', className: 'hc-btn', onClick: onCancelRename, children: 'Cancel' })
+          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || !draft.trim(), children: t('detail.save') }),
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onCancelRename, children: t('detail.cancel') })
         ]
       })
     : jsxs('div', {
         className: 'hc-detail-head',
         children: [
           jsx('span', { className: 'hc-detail-title', children: box.label }),
-          jsx('span', { className: `hc-chip ${state}`, children: STATUS_TEXT[state] || state }),
+          jsx('span', { className: `hc-chip ${state}`, children: statusText(state) }),
           box.kind !== 'drift'
-            ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onStartRename, children: 'Rename' })
+            ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onStartRename, children: t('detail.rename') })
             : null,
           box.kind === 'drift' && !box.removed
             ? jsx('button', {
@@ -1180,25 +1411,25 @@ function Detail({
                 className: 'hc-btn',
                 disabled: busy,
                 onClick: onAdopt,
-                title: 'Keep this file as part of the plan',
-                children: 'Add to plan'
+                title: t('detail.keepFile'),
+                children: t('detail.addToPlan')
               })
             : null,
           box.kind === 'drift' && !box.removed
             ? box.revert_asked
-              ? jsx('span', { className: 'hc-chip', title: 'The agent puts the file back, then removes this box', children: 'undo asked' })
+              ? jsx('span', { className: 'hc-chip', title: t('detail.undoTip'), children: t('detail.undoAsked') })
               : jsx('button', {
                   type: 'button',
                   className: 'hc-btn',
                   disabled: busy,
                   onClick: onRevert,
-                  title: 'Ask the agent to put this file back as it was',
-                  children: 'Revert'
+                  title: t('detail.revertTip'),
+                  children: t('detail.revert')
                 })
             : null,
           box.removed
-            ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onRestore, children: 'Restore' })
-            : jsx('button', { type: 'button', className: 'hc-btn danger', disabled: busy, onClick: onRemove, children: 'Remove' })
+            ? jsx('button', { type: 'button', className: 'hc-btn', disabled: busy, onClick: onRestore, children: t('detail.restore') })
+            : jsx('button', { type: 'button', className: 'hc-btn danger', disabled: busy, onClick: onRemove, children: t('detail.remove') })
         ]
       })
   const output = box.check_output
@@ -1214,7 +1445,7 @@ function Detail({
       ),
       output
         ? jsxs('div', {
-            children: [jsx('div', { className: 'hc-k', children: `Check output (exit ${box.check_exit})` }), output]
+            children: [jsx('div', { className: 'hc-k', children: t('detail.checkOutput', box.check_exit) }), output]
           })
         : null,
       jsx(Changes, { canvasId, box })
@@ -1266,6 +1497,7 @@ async function copyMermaid(doc) {
 const FINALE_MS = 3600
 
 function Finale() {
+  const t = usePluginI18n('hermes-canvas')
   const r = mulberry(7)
   const colors = ['var(--hc-done)', 'var(--hc-doing)', 'var(--hc-note)', 'var(--hc-accent)', 'var(--hc-fail)']
   const bits = Array.from({ length: 46 }, (_, i) => ({
@@ -1296,7 +1528,7 @@ function Finale() {
           i
         )
       ),
-      jsx('b', { children: 'Shipped' })
+      jsx('b', { children: t('finale.shipped') })
     ]
   })
 }
@@ -1304,6 +1536,7 @@ function Finale() {
 /* ---------- history ---------- */
 
 function HistoryBar({ list, n, latest, playing, onPick, onPlay, onClose }) {
+  const t = usePluginI18n('hermes-canvas')
   const item = list.find(h => h.revision === n)
   const when = item ? new Date(item.at * 1000).toLocaleTimeString() : ''
   return jsxs('div', {
@@ -1312,7 +1545,7 @@ function HistoryBar({ list, n, latest, playing, onPick, onPlay, onClose }) {
       jsxs('div', {
         className: 'hc-row',
         children: [
-          jsx('button', { type: 'button', className: 'hc-btn', onClick: onPlay, children: playing ? 'Pause' : 'Play' }),
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onPlay, children: playing ? t('history.pause') : t('history.play') }),
           jsx('input', {
             type: 'range',
             className: 'hc-range',
@@ -1320,17 +1553,17 @@ function HistoryBar({ list, n, latest, playing, onPick, onPlay, onClose }) {
             max: latest,
             step: 1,
             value: n,
-            'aria-label': 'Revision',
+            'aria-label': t('history.revision'),
             onChange: e => onPick(Number(e.target.value))
           }),
           jsx('span', { className: 'hc-meta', children: `rev ${n}/${latest}` }),
-          jsx('button', { type: 'button', className: 'hc-btn', onClick: onClose, children: 'Live' })
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onClose, children: t('history.live') })
         ]
       }),
       item
         ? jsx('span', {
             className: 'hc-meta',
-            children: `${item.author === 'user' ? 'You' : item.author === 'agent' ? 'Agent' : 'Hooks'} · ${when} · ${item.reason}`
+            children: `${item.author === 'user' ? t('history.author.user') : item.author === 'agent' ? t('history.author.agent') : t('history.author.hooks')} · ${when} · ${item.reason}`
           })
         : null
     ]
@@ -1353,6 +1586,7 @@ function slugId(label, boxes) {
 }
 
 function AddBox({ after, busy, onAdd, onCancel }) {
+  const t = usePluginI18n('hermes-canvas')
   const [label, setLabel] = useState('')
   return jsxs('form', {
     className: 'hc-detail',
@@ -1361,7 +1595,7 @@ function AddBox({ after, busy, onAdd, onCancel }) {
       if (label.trim()) onAdd(label.trim())
     },
     children: [
-      jsx('div', { className: 'hc-k', children: after ? `New box after "${after.label}"` : 'New box' }),
+      jsx('div', { className: 'hc-k', children: after ? t('add.newAfter', after.label) : t('add.new') }),
       jsxs('div', {
         className: 'hc-row',
         children: [
@@ -1370,18 +1604,18 @@ function AddBox({ after, busy, onAdd, onCancel }) {
             value: label,
             maxLength: 200,
             autoFocus: true,
-            placeholder: 'What should be built?',
-            'aria-label': 'New box name',
+            placeholder: t('add.placeholder'),
+            'aria-label': t('add.nameAria'),
             onChange: e => setLabel(e.target.value),
             onKeyDown: e => {
               if (e.key === 'Escape') onCancel()
             }
           }),
-          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || !label.trim(), children: 'Add' }),
-          jsx('button', { type: 'button', className: 'hc-btn', onClick: onCancel, children: 'Cancel' })
+          jsx('button', { type: 'submit', className: 'hc-btn', disabled: busy || !label.trim(), children: t('add.submit') }),
+          jsx('button', { type: 'button', className: 'hc-btn', onClick: onCancel, children: t('detail.cancel') })
         ]
       }),
-      jsx('span', { className: 'hc-meta', children: 'The agent picks its files and check, then builds it.' })
+      jsx('span', { className: 'hc-meta', children: t('add.hint') })
     ]
   })
 }
@@ -1428,6 +1662,7 @@ function useSessionId() {
 }
 
 function CanvasPane() {
+  const t = usePluginI18n('hermes-canvas')
   const session = useSessionId()
   const visible = useValue(host.paneVisibility(PANE_ID))
   // Subscribed so that the pane redraws when the agent's turn starts or ends (the finish banner).
@@ -1877,7 +2112,7 @@ function CanvasPane() {
             children: [
               jsxs('div', {
                 children: [
-                  jsx('b', { children: 'No canvas in this chat yet' }),
+                  jsx('b', { children: t('pane.noCanvas') }),
                   'Ask Hermes to plan the work first, for example: "Plan it on the canvas, then build it."',
                   error ? jsx('div', { className: 'hc-error', children: error }) : null
                 ]
@@ -1892,7 +2127,7 @@ function CanvasPane() {
   if (!doc) {
     return jsxs('div', {
       className: 'hc-root',
-      children: [jsx(Style, {}), jsx('div', { className: 'hc-board', children: jsx('div', { className: 'hc-empty', children: 'Loading canvas…' }) })]
+      children: [jsx(Style, {}), jsx('div', { className: 'hc-board', children: jsx('div', { className: 'hc-empty', children: t('pane.loading') }) })]
     })
   }
 
@@ -1943,57 +2178,57 @@ function CanvasPane() {
       jsxs('div', {
         className: 'hc-head',
         children: [
-          jsx('span', { className: `hc-live${live ? '' : ' off'}`, title: live ? 'Live updates' : 'Polling for updates' }),
+          jsx('span', { className: `hc-live${live ? '' : ' off'}`, title: live ? t('pane.live') : t('pane.polling') }),
           jsx('span', { className: 'hc-title', title: doc.title, children: doc.title }),
           jsx('span', { className: 'hc-meta', children: `${progress.done}/${progress.total} done · rev ${shown.revision}` }),
           jsx('button', {
             type: 'button',
             className: `hc-btn${past ? ' on hc-follow' : ''}`,
-            title: 'Replay how the plan changed',
+            title: t('pane.historyTip'),
             onClick: () => (past ? setHist(null) : openHistory()),
-            children: 'History'
+            children: t('pane.history')
           }),
           jsx('button', {
             type: 'button',
             className: 'hc-btn',
-            title: 'Copy the canvas as a Mermaid flowchart',
+            title: t('pane.mermaidTip'),
             onClick: () => copyMermaid(shown),
-            children: 'Mermaid'
+            children: t('pane.mermaid')
           }),
           jsx('button', {
             type: 'button',
             className: `hc-btn hc-follow${follow ? ' on' : ''}`,
             'aria-pressed': follow,
-            title: 'Move the view to the box that changes',
+            title: t('pane.followTip'),
             onClick: () => {
               saveFollow(!follow)
               setFollow(!follow)
               setFocus(null)
             },
-            children: 'Follow'
+            children: t('pane.follow')
           }),
           jsx('button', {
             type: 'button',
             className: 'hc-btn',
             disabled: busy || past,
-            title: 'Add a box to the plan',
+            title: t('pane.addBoxTip'),
             onClick: () => {
               setAdding(true)
               setRenaming(false)
             },
-            children: '+ Box'
+            children: t('pane.addBox')
           }),
           jsx('button', {
             type: 'button',
             className: `hc-btn hc-follow${linking ? ' on' : ''}`,
             'aria-pressed': linking,
             disabled: busy || past,
-            title: 'Draw an arrow from a box to a box that must wait for it',
+            title: t('pane.linkTip'),
             onClick: () => {
               setLink(null)
               setLinking(!linking)
             },
-            children: '→ Link'
+            children: t('pane.link')
           })
         ]
       }),
@@ -2124,7 +2359,7 @@ function CanvasPane() {
       showEdits && edits.length
         ? jsxs('div', {
             className: 'hc-edits-panel',
-            children: [jsx('div', { className: 'hc-k', children: 'Your edits · hover to see what the agent reads' }), jsx(EditList, { edits })]
+            children: [jsx('div', { className: 'hc-k', children: t('pane.yourEditsHover') }), jsx(EditList, { edits })]
           })
         : null,
       jsxs('div', {
@@ -2141,9 +2376,9 @@ function CanvasPane() {
                 type: 'button',
                 className: 'hc-textbtn',
                 'aria-expanded': showEdits,
-                title: 'Show your edits and whether the agent got them',
+                title: t('card.editsTip'),
                 onClick: () => setShowEdits(!showEdits),
-                children: pending ? `${pending} edit${pending === 1 ? '' : 's'} waiting for the agent` : 'Your edits'
+                children: pending ? t('card.editsWaiting', pending) : t('card.yourEdits')
               })
             : null,
           error ? jsx('span', { className: 'hc-error', children: error }) : null
@@ -2190,6 +2425,7 @@ function useEdits(canvasId, key, limit) {
 }
 
 function EditList({ edits }) {
+  const t = usePluginI18n('hermes-canvas')
   if (!edits.length) return null
   return jsx('ul', {
     className: 'hc-edits',
@@ -2198,11 +2434,11 @@ function EditList({ edits }) {
         'li',
         {
           className: e.delivered_at ? 'got' : 'wait',
-          title: `The agent reads: ${e.text}`,
+          title: t('edits.readTip', e.text),
           children: [
             jsx('span', { className: 'hc-edit-mark', 'aria-hidden': true, children: e.delivered_at ? '✓' : '…' }),
             jsx('span', { className: 'hc-edit-text', children: firstSentence(e.text) }),
-            jsx('span', { className: 'hc-edit-state', children: e.delivered_at ? 'delivered' : 'waiting' })
+            jsx('span', { className: 'hc-edit-state', children: e.delivered_at ? t('edits.delivered') : t('edits.waiting') })
           ]
         },
         e.id
@@ -2214,6 +2450,7 @@ function EditList({ edits }) {
 /* ---------- the chat card ---------- */
 
 function CanvasCard({ attrs, sessionId }) {
+  const t = usePluginI18n('hermes-canvas')
   const id = attrs && typeof attrs.id === 'string' ? attrs.id : ''
   const valid = CANVAS_ID_RE.test(id)
   const [doc, setDoc] = useState(null)
@@ -2225,7 +2462,7 @@ function CanvasCard({ attrs, sessionId }) {
     try {
       const res = await rest(`/canvas?id=${encodeURIComponent(id)}`)
       setDoc(res.canvas || null)
-      setError(res.canvas ? '' : 'This canvas no longer exists.')
+      setError(res.canvas ? '' : t('card.gone'))
     } catch (err) {
       setError(errorText(err))
     }
@@ -2254,7 +2491,7 @@ function CanvasCard({ attrs, sessionId }) {
   if (!doc) {
     return jsxs('div', {
       className: 'hc-root hc-card',
-      children: [jsx(Style, {}), jsx('span', { className: error ? 'hc-error' : 'hc-meta', children: error || 'Loading canvas…' })]
+      children: [jsx(Style, {}), jsx('span', { className: error ? 'hc-error' : 'hc-meta', children: error || t('pane.loading') })]
     })
   }
   const progress = progressOf(doc)
@@ -2270,7 +2507,7 @@ function CanvasCard({ attrs, sessionId }) {
         className: 'hc-card-head',
         children: [
           jsx('span', { className: 'hc-title', children: doc.title }),
-          jsx('span', { className: 'hc-meta', children: `${progress.done}/${progress.total} done` })
+          jsx('span', { className: 'hc-meta', children: t('card.done', progress.done, progress.total) })
         ]
       }),
       jsx('div', { className: 'hc-bar', children: jsx('i', { style: { width: `${pct}%` } }) }),
@@ -2279,7 +2516,7 @@ function CanvasCard({ attrs, sessionId }) {
         className: 'hc-chips',
         children: parts.map(b => {
           const state = boxState(b)
-          return jsx('span', { className: `hc-chip ${state}`, title: STATUS_TEXT[state] || state, children: b.label }, b.id)
+          return jsx('span', { className: `hc-chip ${state}`, title: statusText(state), children: b.label }, b.id)
         })
       }),
       ...open.map(q =>
@@ -2297,16 +2534,16 @@ function CanvasCard({ attrs, sessionId }) {
           q.id
         )
       ),
-      edits.length ? jsx('div', { className: 'hc-k', children: 'Your edits' }) : null,
+      edits.length ? jsx('div', { className: 'hc-k', children: t('card.yourEdits') }) : null,
       jsx(EditList, { edits }),
       error ? jsx('span', { className: 'hc-error', children: error }) : null,
       jsxs('div', {
         className: 'hc-row',
         children: [
           typeof host.revealPane === 'function'
-            ? jsx('button', { type: 'button', className: 'hc-btn', onClick: revealPane, children: 'Open canvas' })
+            ? jsx('button', { type: 'button', className: 'hc-btn', onClick: revealPane, children: t('card.open') })
             : null,
-          jsx('span', { className: 'hc-meta', children: 'Steer the plan on the canvas: edits reach the agent at once.' })
+          jsx('span', { className: 'hc-meta', children: t('card.hint') })
         ]
       })
     ]
@@ -2317,9 +2554,13 @@ function CanvasCard({ attrs, sessionId }) {
 
 export default {
   id: PLUGIN_ID,
-  name: 'Hermes Canvas',
+  name: tr('app.name'),
   register(ctx) {
     pluginCtx = ctx
+    if (ctx.i18n) {
+      ctx.i18n.register(Object.fromEntries(Object.entries(MESSAGES).map(([locale, flat]) => [locale, messageTree(flat)])))
+      tr = ctx.i18n.t
+    }
     ctx.onEvent(CHANGED_EVENT, event => notifyViews(event))
     ctx.setInterval(() => notifyViews(null), POLL_MS)
     ctx.onDispose(() => {
@@ -2329,7 +2570,7 @@ export default {
     ctx.register({
       id: 'pane',
       area: 'panes',
-      title: 'Canvas',
+      title: tr('pane.title'),
       data: { placement: 'right', width: '420px' },
       render: () => jsx(CanvasPane, {})
     })
