@@ -169,7 +169,14 @@ function wrapText(text, max, lines = 2) {
 /* ---------- layout ---------- */
 
 function boxSize(box) {
-  if (box.kind === 'question') return { w: 220, h: 104 }
+  if (box.kind === 'question') {
+    // A question carries a full sentence plus up to four answers, so it is much wider and
+    // taller than a component box. Sizing it as a component let the option text run out of
+    // its chip and across the neighbouring one.
+    const lines = wrapText(box.label, 40, 3).length || 1
+    const rows = Math.max(1, (box.options || []).length)
+    return { w: 320, h: 26 + lines * 20 + 20 + rows * 36 + 6 }
+  }
   if (box.kind === 'drift') return { w: 200, h: 64 }
   return BOX
 }
@@ -204,20 +211,46 @@ function layout(boxes, vertical) {
     const latest = deps.length ? Math.min(...deps.map(id => levels.get(id))) - 1 : depthOf(box.id)
     levels.set(box.id, box.kind === 'question' ? 0 : Math.max(depthOf(box.id), latest))
   }
-  const rows = new Map()
   const auto = new Map()
   const driftRow = []
+  // Slots follow each box's own size. A uniform pitch only works while every box is BOX; a
+  // question box is 320 wide and up to ~180 tall, so a fixed pitch overlapped its neighbours.
+  const levelSize = new Map()
+  for (const box of boxes) {
+    if (box.kind === 'drift') continue
+    const level = levels.get(box.id)
+    const s = boxSize(box)
+    const m = levelSize.get(level) || { w: 0, h: 0 }
+    levelSize.set(level, { w: Math.max(m.w, s.w), h: Math.max(m.h, s.h) })
+  }
+  const levelStart = (axis) => {
+    const out = new Map()
+    let at = 0
+    for (const level of [...levelSize.keys()].sort((a, b) => a - b)) {
+      out.set(level, at)
+      const size = levelSize.get(level)
+      at += axis === 'x' ? size.w + GAP.x + 40 : size.h + GAP.y + 30
+    }
+    return out
+  }
+  const levelX = levelStart('x')
+  const levelY = levelStart('y')
+  const cursor = new Map() // level -> next slot offset along the stacking axis
   for (const box of boxes) {
     if (box.kind === 'drift') {
       driftRow.push(box)
       continue
     }
     const level = levels.get(box.id)
-    const slot = rows.get(level) || 0
-    rows.set(level, slot + 1)
-    const x = vertical ? slot * (BOX.w + 44) : level * (BOX.w + GAP.x + 40)
-    const y = vertical ? level * (BOX.h + GAP.y + 40) : slot * (BOX.h + GAP.y + 30)
-    auto.set(box.id, { x, y, ...boxSize(box) })
+    const s = boxSize(box)
+    const at = cursor.get(level) || 0
+    if (vertical) {
+      auto.set(box.id, { x: at, y: levelY.get(level), ...s })
+      cursor.set(level, at + s.w + 44)
+    } else {
+      auto.set(box.id, { x: levelX.get(level), y: at, ...s })
+      cursor.set(level, at + s.h + GAP.y + 30)
+    }
   }
   let maxY = 0
   auto.forEach(p => {
@@ -257,6 +290,16 @@ function focusView(fit, p) {
   const w = Math.max(BOX.w * 3.2, fit.w * 0.55)
   if (w >= fit.w * 0.92) return null
   const h = (w * fit.h) / fit.w
+  return { x: p.x + p.w / 2 - w / 2, y: p.y + p.h / 2 - h / 2, w, h }
+}
+
+// A deliberate zoom on the box the user selected: the board keeps the plan's aspect, but the
+// view is sized around one box so its text is drawn at roughly screen size instead of the
+// fit-all scale. Clicking empty board clears it.
+function zoomView(fit, p) {
+  if (!p) return null
+  const w = Math.min(fit.w, Math.max(p.w + 160, 520))
+  const h = Math.max(p.h + 120, (w * fit.h) / Math.max(1, fit.w))
   return { x: p.x + p.w / 2 - w / 2, y: p.y + p.h / 2 - h / 2, w, h }
 }
 
@@ -427,7 +470,7 @@ const STYLE = `
 .hc-opt.chosen rect { fill: var(--hc-ink); }
 .hc-opt.chosen text { fill: var(--hc-paper) !important; }
 .hc-opt.dim { opacity: .45; }
-.hc-opt text { font-weight: 700; font-size: 13px; }
+.hc-opt text { font-weight: 600; font-size: 14px; }
 .hc-sel { fill: none; stroke: var(--hc-accent); stroke-width: 1.5; stroke-dasharray: 5 4; }
 .hc-edge { fill: none; stroke: var(--hc-muted); stroke-width: 1.6; stroke-linecap: round; }
 .hc-edge.ok { stroke: var(--hc-done); }
@@ -443,6 +486,14 @@ const STYLE = `
 .hc-detail { border-top: 1px solid var(--hc-line); padding: 8px 10px 10px; max-height: 46%; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
 .hc-detail-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .hc-detail-title { font-family: var(--hc-hand); font-size: 15px; font-weight: 700; flex: 1; min-width: 80px; overflow-wrap: anywhere; }
+.hc-answerbox { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--hc-line); border-radius: 8px; background: color-mix(in srgb, var(--hc-note) 18%, var(--hc-paper)); }
+.hc-answeropts { display: flex; flex-direction: column; gap: 5px; }
+.hc-answeropt { display: flex; align-items: center; justify-content: space-between; gap: 8px; text-align: left; font: inherit; font-size: 14px; line-height: 1.35; padding: 8px 10px; border: 1px solid var(--hc-line); border-radius: 7px; background: var(--hc-paper); color: var(--hc-ink); cursor: pointer; }
+.hc-answeropt:hover:not(:disabled) { border-color: var(--hc-accent); }
+.hc-answeropt.chosen { background: var(--hc-ink); color: var(--hc-paper); border-color: var(--hc-ink); }
+.hc-answeropt:disabled { opacity: .55; cursor: not-allowed; }
+.hc-answeropt-label { overflow-wrap: anywhere; }
+.hc-answeropt-mark { font-weight: 700; }
 .hc-chip { font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--hc-line); color: var(--hc-muted); white-space: nowrap; }
 .hc-chip.doing { color: var(--hc-doing); border-color: var(--hc-doing); }
 .hc-chip.done { color: var(--hc-done); border-color: var(--hc-done); }
@@ -469,7 +520,13 @@ const STYLE = `
 .hc-textarea { font: inherit; font-family: var(--hc-hand); font-size: 14px; color: var(--hc-ink); background: var(--hc-paper); border: 1px solid var(--hc-accent); border-radius: 6px; padding: 4px 6px; width: 100%; box-sizing: border-box; resize: vertical; min-height: 48px; }
 .hc-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .hc-ask { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.hc-ask-q { font-family: var(--hc-hand); font-size: 14px; font-weight: 700; margin-right: 4px; }
+.hc-asks { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--hc-line); background: color-mix(in srgb, var(--hc-note) 14%, transparent); }
+.hc-asks .hc-ask { flex-direction: column; align-items: stretch; gap: 4px; }
+.hc-ask-q { font-family: var(--hc-hand); font-size: 16px; font-weight: 700; line-height: 1.35; margin-right: 4px; }
+.hc-ask-opts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.hc-ask-opts .hc-btn { font-size: 13.5px; padding: 5px 12px; }
+.hc-ask.answered .hc-ask-q { color: var(--hc-muted); }
+.hc-ask-answer { font-size: 13.5px; font-weight: 600; color: var(--hc-done); }
 .hc-foot { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-top: 1px solid var(--hc-line); color: var(--hc-muted); font-size: 11px; flex-wrap: wrap; }
 .hc-foot .hc-src { font-style: italic; flex: 1; min-width: 0; }
 .hc-error { color: var(--hc-fail); }
@@ -657,7 +714,7 @@ function subLine(box) {
 }
 
 // `born` is the draw-on delay in seconds for a box that just appeared, else undefined.
-function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick, onAnswer }) {
+function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick, onSelect }) {
   const { w, h } = pos
   const state = boxState(box)
   const drawing = born !== undefined
@@ -677,30 +734,41 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
     jsx('path', { className: 'hc-ink', d: srect(hash(box.id), 0, 0, w, h), pathLength: drawing ? 1 : undefined }, 'ink')
   ]
   if (box.kind === 'question') {
-    children.push(jsx(BoxLabel, { box, w, top: 26, size: 15, max: 24 }, 'label'))
-    const n = box.options.length || 1
-    const pad = 14
-    const gap = 8
-    const ow = (w - pad * 2 - gap * (n - 1)) / n
-    box.options.forEach((opt, i) => {
+    const labelMax = 40
+    const lines = wrapText(box.label, labelMax, 3)
+    children.push(jsx(BoxLabel, { box, w, top: 26, size: 17, max: labelMax }, 'label'))
+    // Answers stack: three or four long answers side by side cannot be read at any width.
+    const pad = 12
+    const rowH = 30
+    const rowGap = 6
+    const top = 26 + (lines.length - 1) * 17 * 1.15 + 20
+    ;(box.options || []).forEach((opt, i) => {
       const chosen = box.answer === opt
       const dim = !!box.answer && !chosen
+      const optLines = wrapText(opt, 46, 2)
       children.push(
         jsxs(
           'g',
           {
             className: `hc-opt${chosen ? ' chosen' : ''}${dim ? ' dim' : ''}`,
-            transform: `translate(${pad + i * (ow + gap)} ${h - 42})`,
+            transform: `translate(${pad} ${top + i * (rowH + rowGap)})`,
             onPointerDown: e => e.stopPropagation(),
             onClick: e => {
               e.stopPropagation()
-              if (!box.removed) onAnswer(box, opt)
+              // A click on the tiny tile must never cast an answer by accident. It selects
+              // and zooms the question; the readable answer buttons live in the panel below.
+              onSelect(box)
             },
             role: 'button',
-            'aria-label': `Answer: ${opt}`,
+            'aria-label': `Select this question and answer in the panel: ${opt}`,
             children: [
-              jsx('rect', { width: ow, height: 28, rx: 6 }),
-              jsx('text', { x: ow / 2, y: 19, textAnchor: 'middle', children: opt.length > 16 ? opt.slice(0, 15) + '…' : opt })
+              jsx('rect', { width: w - pad * 2, height: rowH, rx: 6 }),
+              jsx('text', {
+                x: 8,
+                y: optLines.length > 1 ? 12 : 19,
+                textAnchor: 'start',
+                children: optLines.map((line, k) => jsx('tspan', { x: 8, dy: k ? 12.5 : 0, children: line }, k))
+              })
             ]
           },
           `opt-${i}`
@@ -1090,7 +1158,8 @@ function Detail({
   onAdopt,
   onRevert,
   onUnlink,
-  onNote
+  onNote,
+  onAnswer
 }) {
   const [draft, setDraft] = useState(box.label)
   const inputRef = useRef(null)
@@ -1139,9 +1208,6 @@ function Detail({
         )
       })
     ])
-  }
-  if (box.kind === 'question') {
-    rows.push(['Answer', jsx('span', { children: box.answer || 'not answered yet: pick an option on the box' })])
   }
   const head = renaming
     ? jsxs('form', {
@@ -1204,10 +1270,46 @@ function Detail({
   const output = box.check_output
     ? jsx('pre', { className: `hc-pre${box.status === 'failed' ? ' err' : ''}`, children: box.check_output.slice(-1200) })
     : null
+  // The tile is fit-all small, so answers are cast here at panel size. The tile itself only
+  // selects and zooms, which removes the accidental-answer trap on the board.
+  const answerBlock =
+    box.kind === 'question' && !box.removed && (box.options || []).length
+      ? jsxs('div', {
+          className: 'hc-answerbox',
+          children: [
+            jsx('div', { className: 'hc-k', children: box.answer ? 'Answer' : 'Choose an answer' }),
+            jsx(
+              'div',
+              {
+                className: 'hc-answeropts',
+                children: (box.options || []).map(opt =>
+                  jsxs(
+                    'button',
+                    {
+                      type: 'button',
+                      className: `hc-answeropt${box.answer === opt ? ' chosen' : ''}`,
+                      'aria-pressed': box.answer === opt,
+                      disabled: busy,
+                      onClick: () => onAnswer(box, opt),
+                      children: [
+                        jsx('span', { className: 'hc-answeropt-label', children: opt }),
+                        box.answer === opt ? jsx('span', { className: 'hc-answeropt-mark', children: '✓' }) : null
+                      ]
+                    },
+                    opt
+                  )
+                )
+              },
+              'opts'
+            )
+          ]
+        })
+      : null
   return jsxs('div', {
     className: 'hc-detail',
     children: [
       head,
+      answerBlock,
       jsx(NoteEditor, { box, busy, onSave: onNote }),
       ...rows.map(([k, v]) =>
         jsxs('div', { children: [jsx('div', { className: 'hc-k', children: k }), v] }, k)
@@ -1511,6 +1613,7 @@ function CanvasPane() {
   useEffect(() => {
     setDoc(null)
     setSelected(null)
+    setZoom(null)
     setRenaming(false)
     setAdding(false)
     setLinking(false)
@@ -1602,6 +1705,7 @@ function CanvasPane() {
   }
   useEffect(() => () => clearTimeout(holdRef.current), [])
   const [focus, setFocus] = useState(null) // box id
+  const [zoom, setZoom] = useState(null) // box id the user selected for a close look
   const [comets, setComets] = useState([]) // { key, d }
   const [pops, setPops] = useState({}) // box id -> stamp
   const [born, setBorn] = useState({}) // box id -> [draw-on delay (s), stamp], while it draws itself
@@ -1711,6 +1815,7 @@ function CanvasPane() {
     try {
       const res = await rest(`/history?id=${encodeURIComponent(current.id)}`)
       setSelected(null)
+      setZoom(null)
       setAdding(false)
       setRenaming(false)
       setHist({ list: res.revisions || [], n: current.revision, doc: current, playing: false })
@@ -1728,7 +1833,8 @@ function CanvasPane() {
     const t = setTimeout(() => showRevision(hist.n + 1), 750)
     return () => clearTimeout(t)
   }, [hist, showRevision])
-  const target = (follow && !hover && focus && focusView(view, placed.get(focus))) || view
+  const target = (zoom && !past ? zoomView(view, placed.get(zoom)) : null) ||
+    (follow && !hover && focus && focusView(view, placed.get(focus))) || view
   const cam = useCamera(target)
 
   const posOf = id => {
@@ -1812,6 +1918,7 @@ function CanvasPane() {
     }
     setDrag(null)
     setSelected(d.id)
+    setZoom(d.id)
     setRenaming(false)
   }
 
@@ -1845,6 +1952,12 @@ function CanvasPane() {
     if (past || box.answer === option) return
     if (await send([{ op: 'answer', id: box.id, answer: option }])) continueTurn(session.ids, box, option)
   }
+  const selectBox = box => {
+    if (past) return
+    setSelected(box.id)
+    setZoom(box.id)
+    setRenaming(false)
+  }
 
   const onKeyDown = e => {
     if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return
@@ -1862,6 +1975,7 @@ function CanvasPane() {
       if (selBox.kind !== 'drift') setRenaming(true)
     } else if (e.key === 'Escape') {
       setSelected(null)
+      setZoom(null)
     }
   }
 
@@ -1933,6 +2047,9 @@ function CanvasPane() {
   if (!mainBusy) turnRef.current = { busy: false, doc: null, since: null }
   else if (doc && (!turn.busy || turn.doc !== doc.id)) turnRef.current = { busy: true, doc: doc.id, since: doc.revision }
   const gate = gateOf(shown, past ? -1 : turnRef.current.since)
+  const questions = past
+    ? []
+    : shown.boxes.filter(b => b.kind === 'question' && !b.removed)
 
   return jsxs('div', {
     className: 'hc-root',
@@ -1972,6 +2089,18 @@ function CanvasPane() {
             },
             children: 'Follow'
           }),
+          zoom
+            ? jsx('button', {
+                type: 'button',
+                className: 'hc-btn',
+                title: 'Zoom back out to the whole plan',
+                onClick: () => {
+                  setZoom(null)
+                  setSelected(null)
+                },
+                children: 'Fit'
+              })
+            : null,
           jsx('button', {
             type: 'button',
             className: 'hc-btn',
@@ -1997,6 +2126,41 @@ function CanvasPane() {
           })
         ]
       }),
+      questions.length
+        ? jsx('div', {
+            className: 'hc-asks',
+            children: questions.map(q =>
+              jsxs(
+                'div',
+                {
+                  className: `hc-ask${q.answer ? ' answered' : ''}`,
+                  children: [
+                    jsx('div', { className: 'hc-ask-q', children: q.label }),
+                    q.answer
+                      ? jsx('div', { className: 'hc-ask-answer', children: `Answer: ${q.answer}` })
+                      : jsx('div', {
+                          className: 'hc-ask-opts',
+                          children: (q.options || []).map(opt =>
+                            jsx(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'hc-btn',
+                                disabled: busy,
+                                onClick: () => answer(q, opt),
+                                children: opt
+                              },
+                              opt
+                            )
+                          )
+                        })
+                  ]
+                },
+                q.id
+              )
+            )
+          })
+        : null,
       jsxs('div', {
         className: `hc-board${linking ? ' hc-linking' : ''}`,
         ref: boardRef,
@@ -2026,6 +2190,7 @@ function CanvasPane() {
             },
             onPointerDown: () => {
               setSelected(null)
+              setZoom(null)
               setRenaming(false)
             },
             children: [
@@ -2059,7 +2224,7 @@ function CanvasPane() {
                         setSelected(b.id)
                         if (b.kind !== 'drift') setRenaming(true)
                       },
-                      onAnswer: answer
+                      onSelect: selectBox
                     },
                     box.id
                   )
@@ -2118,7 +2283,8 @@ function CanvasPane() {
             onRevert: revert,
             onUnlink: unlink,
             labels: new Map(doc.boxes.map(b => [b.id, b.label])),
-            onNote: note
+            onNote: note,
+            onAnswer: answer
           })
         : null,
       showEdits && edits.length
@@ -2330,7 +2496,7 @@ export default {
       id: 'pane',
       area: 'panes',
       title: 'Canvas',
-      data: { placement: 'right', width: '420px' },
+      data: { placement: 'right' },
       render: () => jsx(CanvasPane, {})
     })
     ctx.register({
