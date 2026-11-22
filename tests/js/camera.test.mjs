@@ -12,6 +12,7 @@ import {
   questionOptions,
   questionRows,
   questionTop,
+  nextQuestion,
   boxSize,
   layout,
   bounds,

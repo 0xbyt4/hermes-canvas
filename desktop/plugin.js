@@ -75,6 +75,19 @@ function questionTop(labelLines) {
   return 26 + (labelLines.length - 1) * TEXT.label * 1.15 + 20
 }
 
+/**
+ * The question still worth looking at after one is answered, in plan order.
+ * Answering must not leave the camera on the box just answered — that re-zooms a question the user
+ * has finished with. Returns null when nothing is open, which is the cue to fit the whole plan.
+ */
+function nextQuestion(boxes, answeredId) {
+  return (
+    (boxes || []).find(
+      b => b.kind === 'question' && !b.removed && !b.answer && b.id !== answeredId
+    ) || null
+  )
+}
+
 function wrapText(text, max, lines = 2) {
   const out = []
   let cur = ''
@@ -2291,7 +2304,31 @@ function CanvasPane() {
   }
   const answer = async (box, option) => {
     if (past || box.answer === option) return
-    if (await send([{ op: 'answer', id: box.id, answer: option }])) continueTurn(session.ids, box, option)
+    const ok = await send([{ op: 'answer', id: box.id, answer: option }])
+    if (ok) continueTurn(session.ids, box, option)
+    // The camera must not keep looking at the box just answered: `zoom` on it made the target a
+    // close-up of the finished question, so answering appeared to zoom the same question in again.
+    lookPastAnswered(box.id)
+  }
+
+  // After an answer: reveal the next open question at the scale already in use, or fit the plan
+  // when that was the last one. If the user was inspecting some other box, leave them there —
+  // moving the camera away from work in progress is worse than not moving at all.
+  const lookPastAnswered = answeredId => {
+    const looking = zoom === answeredId || (!zoom && selected === answeredId)
+    const boxes0 = (docRef.current && docRef.current.boxes) || boxes
+    setZoom(null)
+    if (!looking) return
+    const next = nextQuestion(boxes0, answeredId)
+    setSelected(next ? next.id : null)
+    if (next) {
+      const p = placed.get(next.id)
+      if (p) {
+        setUserView(v => revealBox(v || base, p, content))
+        return
+      }
+    }
+    setUserView(nextView(null, content, 'fit', viewport))
   }
   const selectBox = box => {
     if (past) return

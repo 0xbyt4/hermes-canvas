@@ -57,6 +57,19 @@ export function questionTop(labelLines) {
   return 26 + (labelLines.length - 1) * TEXT.label * 1.15 + 20
 }
 
+/**
+ * The question still worth looking at after one is answered, in plan order.
+ * Answering must not leave the camera on the box just answered — that re-zooms a question the user
+ * has finished with. Returns null when nothing is open, which is the cue to fit the whole plan.
+ */
+export function nextQuestion(boxes, answeredId) {
+  return (
+    (boxes || []).find(
+      b => b.kind === 'question' && !b.removed && !b.answer && b.id !== answeredId
+    ) || null
+  )
+}
+
 export function wrapText(text, max, lines = 2) {
   const out = []
   let cur = ''
