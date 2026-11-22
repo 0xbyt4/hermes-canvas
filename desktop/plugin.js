@@ -11,15 +11,344 @@
 import { host, useValue, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
+// Geometry and camera math are generated from src/camera.js into the marked block below. It cannot
+// be a relative import: a runtime desktop plugin is evaluated from a Blob that may import ONLY
+// @hermes/plugin-sdk and react, so `import './camera.js'` fails the whole pane ("unsupported
+// import"). Edit src/camera.js, then run: node scripts/build-pane.mjs
+// ── BEGIN GENERATED: src/camera.js ──
+// Geometry for the canvas board, and the camera that looks at it.
+//
+// Everything here is pure: give it boxes and a viewport and it returns positions and a view, so
+// the pane only renders, and a test can pin the behaviour that matters. The one rule the whole
+// file exists to protect: content growth never moves the camera the user set. A plan that gains
+// boxes must stay at the scale you were reading it at.
+
+const BOX = { w: 184, h: 78 }
+const GAP = { x: 76, y: 46 }
+const MARGIN = 60
+// Rendered under a box for the "who is working here" line, so bounds include it.
+const SUBLINE = 22
+// Drift boxes are writes outside the plan. They wrap into a grid: one endless row widened the
+// board with every unplanned write, and the fit-all view then shrank the whole canvas each time.
+const DRIFT = { perRow: 4, gapX: 24, gapY: 20 }
+// Zoom limits as screen pixels per board unit.
+const ZOOM = { min: 0.2, max: 3 }
+
+// Text metrics. Labels and answers are SVG text, which cannot be measured before it is laid out, so
+// a wrap width is computed from the box width and a conservative glyph advance (advance is a
+// fraction of the font size). Wrapping by character count alone is what pushed a question's title
+// out of its own box: 40 characters at font-size 17 need ~350 units inside a 320-wide box, and a
+// centred label then spilled over both edges.
+const TEXT = {
+  label: 17,
+  opt: 14,
+  advance: 0.55,
+  labelInset: 26,
+  optInset: 18,
+  optLine: 13.5,
+  optRowMin: 30,
+  optGap: 6,
+}
+const QUESTION_W = 320
+
+/** How many characters of `px` type fit across `width`, less `inset` of padding. */
+const charsFor = (width, px, inset) =>
+  Math.max(8, Math.floor((width - inset) / (px * TEXT.advance)))
+
+/** The question's own sentence, wrapped to its box. */
+function questionLabel(box, w = QUESTION_W) {
+  return wrapText(box.label, charsFor(w, TEXT.label, TEXT.labelInset), 3)
+}
+
+/** Each answer, wrapped to the row it sits in. */
+function questionOptions(box, w = QUESTION_W) {
+  return (box.options || []).map(opt => wrapText(opt, charsFor(w, TEXT.opt, TEXT.optInset), 2))
+}
+
+/** One row per answer, taller when that answer wraps. */
+function questionRows(box, w = QUESTION_W) {
+  return questionOptions(box, w).map(lines => Math.max(TEXT.optRowMin, 6 + lines.length * TEXT.optLine))
+}
+
+/** Where the first answer row starts, below the wrapped question. */
+function questionTop(labelLines) {
+  return 26 + (labelLines.length - 1) * TEXT.label * 1.15 + 20
+}
+
+/**
+ * The question still worth looking at after one is answered, in plan order.
+ * Answering must not leave the camera on the box just answered — that re-zooms a question the user
+ * has finished with. Returns null when nothing is open, which is the cue to fit the whole plan.
+ */
+function nextQuestion(boxes, answeredId) {
+  return (
+    (boxes || []).find(
+      b => b.kind === 'question' && !b.removed && !b.answer && b.id !== answeredId
+    ) || null
+  )
+}
+
+function wrapText(text, max, lines = 2) {
+  const out = []
+  let cur = ''
+  for (const raw of String(text || '').split(/\s+/)) {
+    let w = raw
+    if (!w) continue
+    // A single token longer than the line — a file path, a URL, a long flag — is hard-broken.
+    // Leaving it whole made it overflow the box no matter what width the wrapper was given.
+    while (w.length > max) {
+      if (cur) {
+        out.push(cur)
+        cur = ''
+      }
+      out.push(w.slice(0, max))
+      w = w.slice(max)
+    }
+    if ((cur + ' ' + w).trim().length > max && cur) {
+      out.push(cur)
+      cur = w
+    } else cur = (cur + ' ' + w).trim()
+  }
+  if (cur) out.push(cur)
+  if (out.length > lines) {
+    const kept = out.slice(0, lines)
+    kept[lines - 1] = kept[lines - 1].slice(0, max - 1) + '…'
+    return kept
+  }
+  return out
+}
+
+/* ---------- box sizes ---------- */
+
+function boxSize(box) {
+  if (box.kind === 'question') {
+    // A question carries a full sentence plus up to four answers, so it is much wider and taller
+    // than a component box. The height comes from the same wrapping the renderer uses, so a
+    // wrapped answer can neither clip nor overlap the row below it.
+    const w = QUESTION_W
+    const label = questionLabel(box, w)
+    const rows = questionRows(box, w)
+    const h = questionTop(label) + rows.reduce((sum, r) => sum + r + TEXT.optGap, 0) + 6
+    return { w, h }
+  }
+  if (box.kind === 'drift') return { w: 200, h: 64 }
+  return { ...BOX }
+}
+
+/* ---------- layout ---------- */
+
+// A removed box stays in the document so it can be restored, but it must not take a slot in the
+// plan: every deletion would otherwise widen the board, and Fit would zoom the live work smaller
+// and smaller with each one. Show removed boxes only when the user asks to see them.
+function shownBoxes(boxes, showRemoved = false) {
+  return showRemoved ? boxes : boxes.filter(b => !b.removed)
+}
+
+// Every box gets an automatic slot by dependency depth: in columns (left to right) on a wide pane,
+// in rows (top to bottom) on a tall one, so boxes stay readable. A box sits one step before the
+// first box that waits for it, so a box with no dependencies is drawn next to its user, not far
+// to the left. A box the user moved keeps its own x/y, but still holds its slot, so moving one box
+// never shifts the others.
+function layout(boxes, vertical = false) {
+  const byId = new Map(boxes.map(b => [b.id, b]))
+  const depth = new Map()
+  const depthOf = (id, seen = new Set()) => {
+    if (depth.has(id)) return depth.get(id)
+    if (seen.has(id)) return 0
+    seen.add(id)
+    const box = byId.get(id)
+    const deps = (box && box.after ? box.after : []).filter(a => byId.has(a))
+    const d = deps.length ? 1 + Math.max(...deps.map(a => depthOf(a, seen))) : 0
+    depth.set(id, d)
+    return d
+  }
+  const users = new Map() // box id -> the boxes that wait for it
+  for (const box of boxes) {
+    for (const a of box.after || []) if (byId.has(a)) users.set(a, [...(users.get(a) || []), box.id])
+  }
+  // Latest level: users first (they are deeper), then each box one level before its nearest user.
+  const levels = new Map()
+  const order = boxes.filter(b => b.kind !== 'drift').sort((a, b) => depthOf(b.id) - depthOf(a.id))
+  for (const box of order) {
+    const deps = (users.get(box.id) || []).filter(id => levels.has(id))
+    const latest = deps.length ? Math.min(...deps.map(id => levels.get(id))) - 1 : depthOf(box.id)
+    levels.set(box.id, box.kind === 'question' ? 0 : Math.max(depthOf(box.id), latest))
+  }
+
+  const auto = new Map()
+  const drift = []
+  // Slots follow each box's own size. A uniform pitch only works while every box is BOX; a
+  // question box is 320 wide and up to ~180 tall, so a fixed pitch overlapped its neighbours.
+  const levelSize = new Map()
+  for (const box of boxes) {
+    if (box.kind === 'drift') continue
+    const level = levels.get(box.id)
+    const s = boxSize(box)
+    const m = levelSize.get(level) || { w: 0, h: 0 }
+    levelSize.set(level, { w: Math.max(m.w, s.w), h: Math.max(m.h, s.h) })
+  }
+  const levelStart = axis => {
+    const out = new Map()
+    let at = 0
+    for (const level of [...levelSize.keys()].sort((a, b) => a - b)) {
+      out.set(level, at)
+      const size = levelSize.get(level)
+      at += axis === 'x' ? size.w + GAP.x + 40 : size.h + GAP.y + 30
+    }
+    return out
+  }
+  const levelX = levelStart('x')
+  const levelY = levelStart('y')
+  const cursor = new Map() // level -> next slot offset along the stacking axis
+  for (const box of boxes) {
+    if (box.kind === 'drift') {
+      drift.push(box)
+      continue
+    }
+    const level = levels.get(box.id)
+    const s = boxSize(box)
+    const at = cursor.get(level) || 0
+    if (vertical) {
+      auto.set(box.id, { x: at, y: levelY.get(level), ...s })
+      cursor.set(level, at + s.w + 44)
+    } else {
+      auto.set(box.id, { x: levelX.get(level), y: at, ...s })
+      cursor.set(level, at + s.h + GAP.y + 30)
+    }
+  }
+
+  // Drift wraps: a fixed number per row, so unplanned writes cannot widen the board.
+  let maxY = 0
+  auto.forEach(p => {
+    maxY = Math.max(maxY, p.y + p.h)
+  })
+  const driftW = boxSize({ kind: 'drift' }).w
+  const driftH = boxSize({ kind: 'drift' }).h
+  const top = maxY ? maxY + GAP.y + 30 : 0
+  drift.forEach((box, i) => {
+    const col = i % DRIFT.perRow
+    const row = Math.floor(i / DRIFT.perRow)
+    auto.set(box.id, {
+      x: col * (driftW + DRIFT.gapX),
+      y: top + row * (driftH + DRIFT.gapY),
+      ...boxSize(box),
+    })
+  })
+
+  const placed = new Map()
+  for (const box of boxes) {
+    const p = auto.get(box.id)
+    if (!p) continue
+    const pinned = typeof box.x === 'number' && typeof box.y === 'number'
+    placed.set(box.id, pinned ? { ...p, x: box.x, y: box.y } : p)
+  }
+  return placed
+}
+
+function bounds(placed) {
+  let x0 = Infinity
+  let y0 = Infinity
+  let x1 = -Infinity
+  let y1 = -Infinity
+  placed.forEach(p => {
+    x0 = Math.min(x0, p.x)
+    y0 = Math.min(y0, p.y)
+    x1 = Math.max(x1, p.x + p.w)
+    y1 = Math.max(y1, p.y + p.h + SUBLINE)
+  })
+  if (!isFinite(x0)) return { x: 0, y: 0, w: 600, h: 400 }
+  return { x: x0 - MARGIN, y: y0 - MARGIN, w: x1 - x0 + MARGIN * 2, h: y1 - y0 + MARGIN * 2 }
+}
+
+/* ---------- camera ---------- */
+
+// Screen pixels per board unit, which is what the zoom readout shows.
+function scaleOf(view, viewport) {
+  return viewport.w / Math.max(1, view.w)
+}
+
+// The whole plan, in a window of the viewport's aspect. This is the only view content may pick.
+function fitView(content, viewport) {
+  const ar = Math.max(0.2, viewport.w / Math.max(1, viewport.h))
+  let w = content.w
+  let h = content.h
+  if (w / h > ar) h = w / ar
+  else w = h * ar
+  return { x: content.x + content.w / 2 - w / 2, y: content.y + content.h / 2 - h / 2, w, h }
+}
+
+// Zoom by `factor` while the board point under the pointer stays under the pointer.
+function zoomAt(view, factor, px, py, viewport) {
+  const w0 = Math.max(1, view.w)
+  const minW = viewport.w / ZOOM.max
+  const maxW = viewport.w / ZOOM.min
+  const w = Math.min(maxW, Math.max(minW, w0 / factor))
+  const k = w / w0
+  return { x: px - (px - view.x) * k, y: py - (py - view.y) * k, w, h: view.h * k }
+}
+
+// Drag the board by a pointer delta in screen pixels. The view keeps its size: panning never zooms.
+function panByPixels(view, dx, dy, viewport) {
+  const scale = scaleOf(view, viewport)
+  return { ...view, x: view.x - dx / scale, y: view.y - dy / scale }
+}
+
+// Keep the view on the plan: slide it back inside the content, and centre it when the view is
+// bigger than the content. Size is never touched, so a clamp cannot zoom.
+function clampView(view, content) {
+  const x0 = content.x - MARGIN
+  const y0 = content.y - MARGIN
+  const x1 = content.x + content.w + MARGIN
+  const y1 = content.y + content.h + MARGIN
+  const x = view.w >= x1 - x0 ? (x0 + x1) / 2 - view.w / 2 : Math.min(Math.max(view.x, x0), x1 - view.w)
+  const y = view.h >= y1 - y0 ? (y0 + y1) / 2 - view.h / 2 : Math.min(Math.max(view.y, y0), y1 - view.h)
+  return { ...view, x, y }
+}
+
+function visible(view, box, pad = 24) {
+  if (!box) return true
+  return (
+    box.x + box.w >= view.x + pad &&
+    box.x <= view.x + view.w - pad &&
+    box.y + box.h >= view.y + pad &&
+    box.y <= view.y + view.h - pad
+  )
+}
+
+// Slide the view the least it can to show a box, at the scale it already has.
+function revealBox(view, box, content) {
+  if (visible(view, box)) return view
+  let x = view.x
+  let y = view.y
+  if (box.x < view.x) x = box.x - MARGIN
+  else if (box.x + box.w > view.x + view.w) x = box.x + box.w - view.w + MARGIN
+  if (box.y < view.y) y = box.y - MARGIN
+  else if (box.y + box.h > view.y + view.h) y = box.y + box.h - view.h + MARGIN
+  return clampView({ ...view, x, y }, content)
+}
+
+const REFIT_ON = ['open', 'fit', 'question']
+
+// The camera policy, in one place. `reason` is why the view is being reconsidered:
+//   'open'     a different canvas was opened  -> fit the plan
+//   'fit'      the user pressed Fit           -> fit the plan
+//   'question' a question box arrived         -> reveal it, at the scale already in use
+//   'content'  boxes appeared, moved or went  -> do nothing at all
+// That last line is the point: content never changes the zoom you are reading at.
+function nextView(prev, content, reason, viewport, opts = {}) {
+  const fit = clampView(fitView(content, viewport), content)
+  if (!prev) return fit
+  if (reason === 'open' || reason === 'fit') return fit
+  if (reason === 'question' && opts.box) return revealBox(prev, opts.box, content)
+  return prev
+}
+// ── END GENERATED: src/camera.js ──
 
 const PLUGIN_ID = 'hermes-canvas'
 const PANE_ID = `${PLUGIN_ID}:pane`
 const CHANGED_EVENT = `plugin.${PLUGIN_ID}.changed`
 const POLL_MS = 4000
 const CANVAS_ID_RE = /^cv-[0-9a-f]{10}$/
-const BOX = { w: 184, h: 78 }
-const GAP = { x: 76, y: 46 }
-const MARGIN = 60
 
 let pluginCtx = null
 const subscribers = new Set() // mounted views: fn(event | null)
@@ -147,119 +476,17 @@ function hatchPath(id, w, h, step = 10, pad = 5) {
   return d
 }
 
-function wrapText(text, max, lines = 2) {
-  const out = []
-  let cur = ''
-  for (const w of String(text || '').split(/\s+/)) {
-    if (!w) continue
-    if ((cur + ' ' + w).trim().length > max && cur) {
-      out.push(cur)
-      cur = w
-    } else cur = (cur + ' ' + w).trim()
-  }
-  if (cur) out.push(cur)
-  if (out.length > lines) {
-    const kept = out.slice(0, lines)
-    kept[lines - 1] = kept[lines - 1].slice(0, max - 1) + '…'
-    return kept
-  }
-  return out
-}
-
-/* ---------- layout ---------- */
-
-function boxSize(box) {
-  if (box.kind === 'question') return { w: 220, h: 104 }
-  if (box.kind === 'drift') return { w: 200, h: 64 }
-  return BOX
-}
-
 // Every box gets an automatic slot by dependency depth: in columns (left to right) on a wide pane,
 // in rows (top to bottom) on a tall one, so boxes stay readable. A box sits one step before the
 // first box that waits for it, so a box with no dependencies is drawn next to its user, not far
 // to the left. A box the user moved keeps its own x/y, but still holds its slot, so moving one box
 // never shifts the others.
-function layout(boxes, vertical) {
-  const byId = new Map(boxes.map(b => [b.id, b]))
-  const depth = new Map()
-  const depthOf = (id, seen = new Set()) => {
-    if (depth.has(id)) return depth.get(id)
-    if (seen.has(id)) return 0
-    seen.add(id)
-    const box = byId.get(id)
-    const deps = (box && box.after ? box.after : []).filter(a => byId.has(a))
-    const d = deps.length ? 1 + Math.max(...deps.map(a => depthOf(a, seen))) : 0
-    depth.set(id, d)
-    return d
-  }
-  const users = new Map() // box id -> the boxes that wait for it
-  for (const box of boxes) {
-    for (const a of box.after || []) if (byId.has(a)) users.set(a, [...(users.get(a) || []), box.id])
-  }
-  // Latest level: users first (they are deeper), then each box one level before its nearest user.
-  const levels = new Map()
-  const order = boxes.filter(b => b.kind !== 'drift').sort((a, b) => depthOf(b.id) - depthOf(a.id))
-  for (const box of order) {
-    const deps = (users.get(box.id) || []).filter(id => levels.has(id))
-    const latest = deps.length ? Math.min(...deps.map(id => levels.get(id))) - 1 : depthOf(box.id)
-    levels.set(box.id, box.kind === 'question' ? 0 : Math.max(depthOf(box.id), latest))
-  }
-  const rows = new Map()
-  const auto = new Map()
-  const driftRow = []
-  for (const box of boxes) {
-    if (box.kind === 'drift') {
-      driftRow.push(box)
-      continue
-    }
-    const level = levels.get(box.id)
-    const slot = rows.get(level) || 0
-    rows.set(level, slot + 1)
-    const x = vertical ? slot * (BOX.w + 44) : level * (BOX.w + GAP.x + 40)
-    const y = vertical ? level * (BOX.h + GAP.y + 40) : slot * (BOX.h + GAP.y + 30)
-    auto.set(box.id, { x, y, ...boxSize(box) })
-  }
-  let maxY = 0
-  auto.forEach(p => {
-    maxY = Math.max(maxY, p.y + p.h)
-  })
-  driftRow.forEach((box, i) => {
-    auto.set(box.id, { x: i * (220 + 24), y: maxY + GAP.y + 30, ...boxSize(box) })
-  })
-  const placed = new Map()
-  for (const box of boxes) {
-    const p = auto.get(box.id)
-    const pinned = typeof box.x === 'number' && typeof box.y === 'number'
-    placed.set(box.id, pinned ? { ...p, x: box.x, y: box.y } : p)
-  }
-  return placed
-}
-
-// The view only grows while the same canvas is shown in the same orientation: a box moved inside
-// the board must not rescale or shift the rest.
-function stickyView(prev, next) {
-  if (!prev) return next
-  const x0 = Math.min(prev.x, next.x)
-  const y0 = Math.min(prev.y, next.y)
-  const x1 = Math.max(prev.x + prev.w, next.x + next.w)
-  const y1 = Math.max(prev.y + prev.h, next.y + next.h)
-  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
-}
-
 const CAMERA_MS = 650
 const FOCUS_MS = 2600
 // The camera holds still while the pointer moves on the board, and this long after it stops.
 const HOLD_MS = 1500
 
 // A view centered on one box, with the fit view's aspect, or null when zooming would not help.
-function focusView(fit, p) {
-  if (!p) return null
-  const w = Math.max(BOX.w * 3.2, fit.w * 0.55)
-  if (w >= fit.w * 0.92) return null
-  const h = (w * fit.h) / fit.w
-  return { x: p.x + p.w / 2 - w / 2, y: p.y + p.h / 2 - h / 2, w, h }
-}
-
 const easeInOut = t => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
 
 function mixView(a, b, t) {
@@ -273,10 +500,18 @@ function sameView(a, b) {
 const reducedMotion = () =>
   typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
-// Eases the shown view toward `target`. Returns the view to draw.
+// Eases the shown view toward `target`, and can be told to jump: `jump` cancels the easing and
+// shows a view at once, which is what a gesture needs. Returns the view to draw and the jump.
 function useCamera(target) {
   const [cam, setCam] = useState(target)
   const camRef = useRef(target)
+  const animRef = useRef(0)
+  const jump = useCallback(next => {
+    cancelAnimationFrame(animRef.current)
+    animRef.current = 0
+    camRef.current = next
+    setCam(next)
+  }, [])
   useEffect(() => {
     const from = camRef.current
     if (sameView(from, target)) return
@@ -285,34 +520,42 @@ function useCamera(target) {
       setCam(target)
       return
     }
-    let raf = 0
     const start = performance.now()
     const tick = now => {
       const t = Math.min(1, (now - start) / CAMERA_MS)
       const v = mixView(from, target, easeInOut(t))
       camRef.current = v
       setCam(v)
-      if (t < 1) raf = requestAnimationFrame(tick)
+      if (t < 1) animRef.current = requestAnimationFrame(tick)
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    animRef.current = requestAnimationFrame(tick)
+    return () => {
+      cancelAnimationFrame(animRef.current)
+      animRef.current = 0
+    }
   }, [target.x, target.y, target.w, target.h])
-  return cam
+  return { cam, jump }
 }
 
-function bounds(placed) {
-  let x0 = Infinity
-  let y0 = Infinity
-  let x1 = -Infinity
-  let y1 = -Infinity
-  placed.forEach(p => {
-    x0 = Math.min(x0, p.x)
-    y0 = Math.min(y0, p.y)
-    x1 = Math.max(x1, p.x + p.w)
-    y1 = Math.max(y1, p.y + p.h + 22)
-  })
-  if (!isFinite(x0)) return { x: 0, y: 0, w: 600, h: 400 }
-  return { x: x0 - MARGIN, y: y0 - MARGIN, w: x1 - x0 + MARGIN * 2, h: y1 - y0 + MARGIN * 2 }
+// Zoom onto one box at roughly panel size, keeping the panel's aspect. Used by select-to-zoom.
+function boxZoomView(box, base, viewport, content) {
+  const ar = viewport.w / Math.max(1, viewport.h)
+  const w = Math.min(base.w, Math.max(box.w + 160, 520))
+  return clampView(
+    { x: box.x + box.w / 2 - w / 2, y: box.y + box.h / 2 - w / ar / 2, w, h: w / ar },
+    content
+  )
+}
+
+// Follow: a light zoom toward the box that is working. Returns null when the plan is already
+// close enough that a zoom would only move the view for no gain.
+function followView(base, p, viewport, content) {
+  if (!p) return null
+  const ar = viewport.w / Math.max(1, viewport.h)
+  const w = Math.max(BOX.w * 3.2, base.w * 0.55)
+  if (w >= base.w * 0.92) return null
+  const h = w / ar
+  return clampView({ x: p.x + p.w / 2 - w / 2, y: p.y + p.h / 2 - h / 2, w, h }, content)
 }
 
 // Where the line from a's center toward b's center leaves a's rectangle.
@@ -397,7 +640,18 @@ const STYLE = `
 .hc-meta { color: var(--hc-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .hc-live { width: 7px; height: 7px; border-radius: 50%; background: var(--hc-done); flex: none; }
 .hc-live.off { background: var(--hc-muted); }
-.hc-board { position: relative; flex: 1; min-height: 160px; overflow: hidden; }
+.hc-board { position: relative; flex: 1; min-height: 160px; overflow: hidden; cursor: grab; }
+.hc-board.hc-panning { cursor: grabbing; }
+/* While a gesture is running the decorative animations stand still: they repaint every frame on top
+   of the pan/zoom the hand is waiting for. */
+.hc-board.hc-panning .hc-ring,
+.hc-board.hc-panning .hc-hatch,
+.hc-board.hc-panning .hc-comet { animation-play-state: paused; }
+.hc-board.hc-linking { cursor: crosshair; }
+/* The camera the user owns: a zoom readout between the two buttons, and steppers that never
+   grow the toolbar into the board. */
+.hc-pct { font-size: 11px; font-weight: 600; color: var(--hc-muted); min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
+.hc-zoom { min-width: 26px; padding-left: 0; padding-right: 0; font-size: 14px; line-height: 1; }
 .hc-board svg { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; user-select: none; }
 .hc-dots { fill: var(--hc-line); opacity: .6; }
 .hc-el { cursor: pointer; }
@@ -427,7 +681,7 @@ const STYLE = `
 .hc-opt.chosen rect { fill: var(--hc-ink); }
 .hc-opt.chosen text { fill: var(--hc-paper) !important; }
 .hc-opt.dim { opacity: .45; }
-.hc-opt text { font-weight: 700; font-size: 13px; }
+.hc-opt text { font-weight: 600; font-size: 14px; }
 .hc-sel { fill: none; stroke: var(--hc-accent); stroke-width: 1.5; stroke-dasharray: 5 4; }
 .hc-edge { fill: none; stroke: var(--hc-muted); stroke-width: 1.6; stroke-linecap: round; }
 .hc-edge.ok { stroke: var(--hc-done); }
@@ -443,6 +697,14 @@ const STYLE = `
 .hc-detail { border-top: 1px solid var(--hc-line); padding: 8px 10px 10px; max-height: 46%; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
 .hc-detail-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .hc-detail-title { font-family: var(--hc-hand); font-size: 15px; font-weight: 700; flex: 1; min-width: 80px; overflow-wrap: anywhere; }
+.hc-answerbox { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--hc-line); border-radius: 8px; background: color-mix(in srgb, var(--hc-note) 18%, var(--hc-paper)); }
+.hc-answeropts { display: flex; flex-direction: column; gap: 5px; }
+.hc-answeropt { display: flex; align-items: center; justify-content: space-between; gap: 8px; text-align: left; font: inherit; font-size: 14px; line-height: 1.35; padding: 8px 10px; border: 1px solid var(--hc-line); border-radius: 7px; background: var(--hc-paper); color: var(--hc-ink); cursor: pointer; }
+.hc-answeropt:hover:not(:disabled) { border-color: var(--hc-accent); }
+.hc-answeropt.chosen { background: var(--hc-ink); color: var(--hc-paper); border-color: var(--hc-ink); }
+.hc-answeropt:disabled { opacity: .55; cursor: not-allowed; }
+.hc-answeropt-label { overflow-wrap: anywhere; }
+.hc-answeropt-mark { font-weight: 700; }
 .hc-chip { font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--hc-line); color: var(--hc-muted); white-space: nowrap; }
 .hc-chip.doing { color: var(--hc-doing); border-color: var(--hc-doing); }
 .hc-chip.done { color: var(--hc-done); border-color: var(--hc-done); }
@@ -469,7 +731,13 @@ const STYLE = `
 .hc-textarea { font: inherit; font-family: var(--hc-hand); font-size: 14px; color: var(--hc-ink); background: var(--hc-paper); border: 1px solid var(--hc-accent); border-radius: 6px; padding: 4px 6px; width: 100%; box-sizing: border-box; resize: vertical; min-height: 48px; }
 .hc-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .hc-ask { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.hc-ask-q { font-family: var(--hc-hand); font-size: 14px; font-weight: 700; margin-right: 4px; }
+.hc-asks { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--hc-line); background: color-mix(in srgb, var(--hc-note) 14%, transparent); }
+.hc-asks .hc-ask { flex-direction: column; align-items: stretch; gap: 4px; }
+.hc-ask-q { font-family: var(--hc-hand); font-size: 16px; font-weight: 700; line-height: 1.35; margin-right: 4px; }
+.hc-ask-opts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.hc-ask-opts .hc-btn { font-size: 13.5px; padding: 5px 12px; }
+.hc-ask.answered .hc-ask-q { color: var(--hc-muted); }
+.hc-ask-answer { font-size: 13.5px; font-weight: 600; color: var(--hc-done); }
 .hc-foot { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-top: 1px solid var(--hc-line); color: var(--hc-muted); font-size: 11px; flex-wrap: wrap; }
 .hc-foot .hc-src { font-style: italic; flex: 1; min-width: 0; }
 .hc-error { color: var(--hc-fail); }
@@ -619,14 +887,14 @@ function Badge({ box, w }) {
   return null
 }
 
-function BoxLabel({ box, w, top, size, max }) {
-  const lines = wrapText(box.label, max)
+function BoxLabel({ box, w, top, size, max, lines }) {
+  const text = lines || wrapText(box.label, max)
   return jsx('text', {
     x: w / 2,
     y: top,
     textAnchor: 'middle',
     fontSize: size,
-    children: lines.map((line, i) => jsx('tspan', { x: w / 2, dy: i ? size * 1.15 : 0, children: line }, i))
+    children: text.map((line, i) => jsx('tspan', { x: w / 2, dy: i ? size * 1.15 : 0, children: line }, i))
   })
 }
 
@@ -657,7 +925,7 @@ function subLine(box) {
 }
 
 // `born` is the draw-on delay in seconds for a box that just appeared, else undefined.
-function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick, onAnswer }) {
+function BoxEl({ box, pos, selected, zoomed, popped, born, onPointerDown, onDoubleClick, onSelect, onAnswer }) {
   const { w, h } = pos
   const state = boxState(box)
   const drawing = born !== undefined
@@ -677,35 +945,52 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
     jsx('path', { className: 'hc-ink', d: srect(hash(box.id), 0, 0, w, h), pathLength: drawing ? 1 : undefined }, 'ink')
   ]
   if (box.kind === 'question') {
-    children.push(jsx(BoxLabel, { box, w, top: 26, size: 15, max: 24 }, 'label'))
-    const n = box.options.length || 1
-    const pad = 14
-    const gap = 8
-    const ow = (w - pad * 2 - gap * (n - 1)) / n
-    box.options.forEach((opt, i) => {
+    // Wrap widths come from the box width (src/camera.js), never a bare character count: the title
+    // is centred, so a line wider than the box spills over BOTH edges.
+    const lines = questionLabel(box, w)
+    const opts = questionOptions(box, w)
+    const rows = questionRows(box, w)
+    children.push(jsx(BoxLabel, { box, w, top: 26, size: TEXT.label, lines }, 'label'))
+    // Answers stack: three or four long answers side by side cannot be read at any width.
+    const pad = 12
+    let top = questionTop(lines)
+    ;(box.options || []).forEach((opt, i) => {
       const chosen = box.answer === opt
       const dim = !!box.answer && !chosen
+      const rowH = rows[i] || TEXT.optRowMin
+      const optLines = opts[i] || [opt]
       children.push(
         jsxs(
           'g',
           {
             className: `hc-opt${chosen ? ' chosen' : ''}${dim ? ' dim' : ''}`,
-            transform: `translate(${pad + i * (ow + gap)} ${h - 42})`,
+            transform: `translate(${pad} ${top})`,
             onPointerDown: e => e.stopPropagation(),
             onClick: e => {
               e.stopPropagation()
-              if (!box.removed) onAnswer(box, opt)
+              // Reading distance decides what a chip click means. Zoomed in, the chip is legible and
+              // the click is the answer — that is the button the user is aiming at. At fit scale the
+              // chip is a few pixels of text, so a click there only zooms in: a stray click on a
+              // 4px chip must never cast a vote.
+              if (zoomed) onAnswer(box, opt)
+              else onSelect(box)
             },
             role: 'button',
-            'aria-label': `Answer: ${opt}`,
+            'aria-label': zoomed ? `Answer: ${opt}` : `Zoom in to answer: ${opt}`,
             children: [
-              jsx('rect', { width: ow, height: 28, rx: 6 }),
-              jsx('text', { x: ow / 2, y: 19, textAnchor: 'middle', children: opt.length > 16 ? opt.slice(0, 15) + '…' : opt })
+              jsx('rect', { width: w - pad * 2, height: rowH, rx: 6 }),
+              jsx('text', {
+                x: 8,
+                y: optLines.length > 1 ? 12 : 19,
+                textAnchor: 'start',
+                children: optLines.map((line, k) => jsx('tspan', { x: 8, dy: k ? TEXT.optLine : 0, children: line }, k))
+              })
             ]
           },
           `opt-${i}`
         )
       )
+      top += rowH + TEXT.optGap
     })
   } else if (box.kind === 'drift') {
     children.push(
@@ -715,7 +1000,7 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
       jsx('text', { x: 12, y: 44, className: 'hc-sub', children: clipStart(box.files[0] || box.label, 34) }, 'path')
     )
   } else {
-    children.push(jsx(BoxLabel, { box, w, top: 34, size: 17, max: 18 }, 'label'))
+    children.push(jsx(BoxLabel, { box, w, top: 34, size: TEXT.label, max: charsFor(w, TEXT.label, TEXT.labelInset) }, 'label'))
     children.push(
       jsx('text', { x: w / 2, y: h - 10, textAnchor: 'middle', className: 'hc-sub', children: clip(subLine(box), 28) }, 'sub')
     )
@@ -1090,7 +1375,8 @@ function Detail({
   onAdopt,
   onRevert,
   onUnlink,
-  onNote
+  onNote,
+  onAnswer
 }) {
   const [draft, setDraft] = useState(box.label)
   const inputRef = useRef(null)
@@ -1139,9 +1425,6 @@ function Detail({
         )
       })
     ])
-  }
-  if (box.kind === 'question') {
-    rows.push(['Answer', jsx('span', { children: box.answer || 'not answered yet: pick an option on the box' })])
   }
   const head = renaming
     ? jsxs('form', {
@@ -1204,10 +1487,46 @@ function Detail({
   const output = box.check_output
     ? jsx('pre', { className: `hc-pre${box.status === 'failed' ? ' err' : ''}`, children: box.check_output.slice(-1200) })
     : null
+  // The tile is fit-all small, so answers are cast here at panel size. The tile itself only
+  // selects and zooms, which removes the accidental-answer trap on the board.
+  const answerBlock =
+    box.kind === 'question' && !box.removed && (box.options || []).length
+      ? jsxs('div', {
+          className: 'hc-answerbox',
+          children: [
+            jsx('div', { className: 'hc-k', children: box.answer ? 'Answer' : 'Choose an answer' }),
+            jsx(
+              'div',
+              {
+                className: 'hc-answeropts',
+                children: (box.options || []).map(opt =>
+                  jsxs(
+                    'button',
+                    {
+                      type: 'button',
+                      className: `hc-answeropt${box.answer === opt ? ' chosen' : ''}`,
+                      'aria-pressed': box.answer === opt,
+                      disabled: busy,
+                      onClick: () => onAnswer(box, opt),
+                      children: [
+                        jsx('span', { className: 'hc-answeropt-label', children: opt }),
+                        box.answer === opt ? jsx('span', { className: 'hc-answeropt-mark', children: '✓' }) : null
+                      ]
+                    },
+                    opt
+                  )
+                )
+              },
+              'opts'
+            )
+          ]
+        })
+      : null
   return jsxs('div', {
     className: 'hc-detail',
     children: [
       head,
+      answerBlock,
       jsx(NoteEditor, { box, busy, onSave: onNote }),
       ...rows.map(([k, v]) =>
         jsxs('div', { children: [jsx('div', { className: 'hc-k', children: k }), v] }, k)
@@ -1407,6 +1726,27 @@ function saveFollow(on) {
   }
 }
 
+// Removed boxes are hidden unless the user asks to see them: a plan that keeps every deletion in
+// its columns pushes the live boxes smaller with each one.
+const REMOVED_KEY = 'hermes-canvas.showRemoved'
+
+function readShowRemoved() {
+  try {
+    return window.localStorage.getItem(REMOVED_KEY) === 'on'
+  } catch (err) {
+    console.warn('[hermes-canvas] could not read the Removed setting', err)
+    return false
+  }
+}
+
+function saveShowRemoved(on) {
+  try {
+    window.localStorage.setItem(REMOVED_KEY, on ? 'on' : 'off')
+  } catch (err) {
+    console.warn('[hermes-canvas] could not save the Removed setting', err)
+  }
+}
+
 // What changed between two revisions of the same canvas: boxes with a new status or new writes,
 // and the boxes that just became done.
 function diffBoxes(prev, boxes) {
@@ -1452,6 +1792,10 @@ function CanvasPane() {
   // The drag lives in a ref: pointer events can arrive before React re-renders, so handlers must
   // not read it from a render's closure. The state copy only redraws the dragged box.
   const dragRef = useRef(null) // { id, dx, dy, startX, startY, moved }
+  // A drag on the empty board pans the camera. Same ref-first pattern: the pointer can move before
+  // React re-renders, and a pan must follow the pointer exactly, not the last rendered view.
+  const panRef = useRef(null) // { x, y, view, moved }
+  const [panning, setPanning] = useState(false)
   // Link mode: drag from a box to the box that must wait for it.
   const [linking, setLinking] = useState(false)
   const linkRef = useRef(null) // { from, x, y, over }
@@ -1511,6 +1855,7 @@ function CanvasPane() {
   useEffect(() => {
     setDoc(null)
     setSelected(null)
+    setZoom(null)
     setRenaming(false)
     setAdding(false)
     setLinking(false)
@@ -1568,7 +1913,12 @@ function CanvasPane() {
     if (!el || typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(entries => {
       const r = entries[0] && entries[0].contentRect
-      if (r && r.width > 0 && r.height > 0) setVertical(r.width < r.height * 1.1)
+      if (r && r.width > 0 && r.height > 0) {
+        setVertical(r.width < r.height * 1.1)
+        // The camera needs the panel's real size: zoom is pixels per board unit, and the zoom
+        // readout is measured against it.
+        setViewport(v => (Math.abs(v.w - r.width) < 0.5 && Math.abs(v.h - r.height) < 0.5 ? v : { w: r.width, h: r.height }))
+      }
     })
     ro.observe(el)
     return () => ro.disconnect()
@@ -1577,16 +1927,51 @@ function CanvasPane() {
   const shown = (hist && hist.doc) || doc
   const past = Boolean(hist)
   const boxes = shown ? shown.boxes : []
-  const placed = useMemo(() => layout(boxes, vertical), [boxes, vertical])
-  const viewRef = useRef(null) // { key, view }
-  const view = useMemo(() => {
-    const key = `${doc ? doc.id : ''}|${vertical}`
-    const fit = bounds(placed)
-    const prev = viewRef.current && viewRef.current.key === key ? viewRef.current.view : null
-    const next = stickyView(prev, fit)
-    viewRef.current = { key, view: next }
-    return next
-  }, [placed, doc ? doc.id : null, vertical])
+  // Removed boxes are kept so they can be restored, but they take no slot unless the user asks to
+  // see them: otherwise every deletion widened the plan and Fit pushed the live boxes smaller.
+  const [showRemoved, setShowRemoved] = useState(readShowRemoved)
+  const removedCount = useMemo(() => boxes.filter(b => b.removed).length, [boxes])
+  const liveBoxes = useMemo(() => shownBoxes(boxes, showRemoved), [boxes, showRemoved])
+  const placed = useMemo(() => layout(liveBoxes, vertical), [liveBoxes, vertical])
+  const content = useMemo(() => bounds(placed), [placed])
+  // The camera belongs to the user. `userView` is the view they set by zooming or panning; null
+  // means nobody has touched it yet, and only then does content decide (the first paint fits).
+  const [viewport, setViewport] = useState({ w: 600, h: 400 })
+  const [userView, setUserView] = useState(null)
+  const docKey = `${doc ? doc.id : ''}|${vertical}`
+  // A different canvas, or the pane turning from wide to tall, fits the plan. One time only.
+  useEffect(() => {
+    setUserView(null)
+  }, [docKey])
+  const base = userView || nextView(null, content, 'open', viewport)
+  // Live copies for the pointer and the wheel: they read the view under the pointer at event
+  // time, not the view the last render happened to close over.
+  const liveView = useRef(base)
+  liveView.current = base
+  const liveContent = useRef(content)
+  liveContent.current = content
+  const liveViewport = useRef(viewport)
+  liveViewport.current = viewport
+  // Moving the camera by hand means the user is looking somewhere specific: Follow must not drag
+  // them back, so any manual move turns it off and says so on the button.
+  //
+  // `immediate` is for gestures. A wheel tick or a drag has to land under the pointer NOW; gliding
+  // there over CAMERA_MS made every gesture feel rubbery and a step behind the hand. The easing is
+  // for moves the user asked for once — Fit, a selected box, Follow — not for continuous input.
+  const jumpRef = useRef(() => {})
+  const takeCamera = (next, immediate = false) => {
+    setZoom(null)
+    if (follow) {
+      saveFollow(false)
+      setFollow(false)
+    }
+    if (immediate) jumpRef.current(next)
+    setUserView(next)
+  }
+  const fitNow = () => {
+    setZoom(null)
+    setUserView(nextView(null, content, 'fit', viewport))
+  }
   // Motion: a box that changes gets a pop, a box that gets done sends a comet to the boxes after
   // it, and the camera (with Follow on) moves to the box that changed, then back to the whole plan.
   const [follow, setFollow] = useState(readFollow)
@@ -1602,6 +1987,17 @@ function CanvasPane() {
   }
   useEffect(() => () => clearTimeout(holdRef.current), [])
   const [focus, setFocus] = useState(null) // box id
+  const [zoom, setZoom] = useState(null) // box id the user selected for a close look
+  // Hiding removed boxes must not leave the panel pointing at a box the board no longer shows.
+  useEffect(() => {
+    if (showRemoved || !selected) return
+    const sel = boxes.find(b => b.id === selected)
+    if (sel && sel.removed) {
+      setSelected(null)
+      setZoom(null)
+      setRenaming(false)
+    }
+  }, [showRemoved, boxes, selected])
   const [comets, setComets] = useState([]) // { key, d }
   const [pops, setPops] = useState({}) // box id -> stamp
   const [born, setBorn] = useState({}) // box id -> [draw-on delay (s), stamp], while it draws itself
@@ -1711,6 +2107,7 @@ function CanvasPane() {
     try {
       const res = await rest(`/history?id=${encodeURIComponent(current.id)}`)
       setSelected(null)
+      setZoom(null)
       setAdding(false)
       setRenaming(false)
       setHist({ list: res.revisions || [], n: current.revision, doc: current, playing: false })
@@ -1728,8 +2125,95 @@ function CanvasPane() {
     const t = setTimeout(() => showRevision(hist.n + 1), 750)
     return () => clearTimeout(t)
   }, [hist, showRevision])
-  const target = (follow && !hover && focus && focusView(view, placed.get(focus))) || view
-  const cam = useCamera(target)
+  // What the camera is aiming at. A selected box zooms in; Follow (and nobody touching the board)
+  // glides to the box that is working; otherwise the view the user set. Content never appears in
+  // this expression: adding boxes cannot move the camera.
+  const zoomBox = !past && zoom ? placed.get(zoom) : null
+  const target = zoomBox
+    ? boxZoomView(zoomBox, base, viewport, content)
+    : follow && !hover && focus
+      ? followView(base, placed.get(focus), viewport, content) || base
+      : base
+  const { cam, jump } = useCamera(target)
+  jumpRef.current = jump
+  const camRefLive = useRef(cam)
+  camRefLive.current = cam
+  // The view everything else reads: the animated camera, not its target.
+  const view = cam
+
+  // Replayed history is a read-only view of the past, so zooming and panning do nothing there.
+  const canMove = !past
+  const canMoveRef = useRef(canMove)
+  canMoveRef.current = canMove
+  const takeCameraRef = useRef(takeCamera)
+  takeCameraRef.current = takeCamera
+
+  const zoomBy = factor => {
+    const v = camRefLive.current
+    const vp = liveViewport.current
+    takeCamera(clampView(zoomAt(v, factor, v.x + v.w / 2, v.y + v.h / 2, vp), liveContent.current), true)
+  }
+  const panBy = (dx, dy) => {
+    takeCamera(clampView(panByPixels(camRefLive.current, dx, dy, liveViewport.current), liveContent.current), true)
+  }
+
+  // A trackpad emits wheel and pointermove events faster than the pane can render, so a gesture is
+  // coalesced to one camera update per frame: the last position of the frame wins, and no time is
+  // spent drawing positions the finger has already left.
+  const pendingCam = useRef(null)
+  const frameRef = useRef(0)
+  const nudgeCamera = next => {
+    pendingCam.current = next
+    if (frameRef.current) return
+    frameRef.current = requestAnimationFrame(() => {
+      frameRef.current = 0
+      const v = pendingCam.current
+      pendingCam.current = null
+      if (v) takeCameraRef.current(v, true)
+    })
+  }
+  useEffect(() => () => {
+    if (frameRef.current) cancelAnimationFrame(frameRef.current)
+  }, [])
+
+  // Wheel and trackpad zoom at the pointer (pinch arrives as ctrl+wheel). React's onWheel is
+  // passive, so preventDefault needs a native listener or the pane scrolls while zooming.
+  useEffect(() => {
+    const el = boardRef.current
+    if (!el) return
+    const onWheel = e => {
+      if (!canMoveRef.current) return
+      e.preventDefault()
+      const rect = el.getBoundingClientRect()
+      const v = camRefLive.current
+      const vp = liveViewport.current
+      const scale = scaleOf(v, vp)
+      const bx = v.x + (e.clientX - rect.left) / Math.max(0.0001, scale)
+      const by = v.y + (e.clientY - rect.top) / Math.max(0.0001, scale)
+      const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.012 : 0.002))
+      nudgeCamera(clampView(zoomAt(v, factor, bx, by, vp), liveContent.current))
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [doc ? doc.id : null])
+
+  // A question that has just arrived is worth showing, at the scale the user is reading at.
+  const newestQuestion = useMemo(() => {
+    for (let i = boxes.length - 1; i >= 0; i--) {
+      const b = boxes[i]
+      if (b.kind === 'question' && !b.removed && !b.answer) return b
+    }
+    return null
+  }, [boxes])
+  const seenQuestion = useRef(null)
+  useEffect(() => {
+    if (past || !newestQuestion) return
+    if (seenQuestion.current === newestQuestion.id) return
+    seenQuestion.current = newestQuestion.id
+    const box = placed.get(newestQuestion.id)
+    if (!box) return
+    setUserView(v => revealBox(v || base, box, content))
+  }, [newestQuestion ? newestQuestion.id : null])
 
   const posOf = id => {
     const p = placed.get(id)
@@ -1775,6 +2259,16 @@ function CanvasPane() {
   }
 
   const onPointerMove = e => {
+    const pn = panRef.current
+    if (pn) {
+      const dx = e.clientX - pn.x
+      const dy = e.clientY - pn.y
+      if (!pn.moved && Math.hypot(dx, dy) < 4) return
+      pn.moved = true
+      // A pan is the user taking the wheel: Follow gets out of the way for good.
+      nudgeCamera(clampView(panByPixels(pn.view, dx, dy, liveViewport.current), liveContent.current))
+      return
+    }
     const l = linkRef.current
     if (l) {
       const p = toBoard(e)
@@ -1791,6 +2285,18 @@ function CanvasPane() {
   }
 
   const onPointerUp = async () => {
+    const pn = panRef.current
+    if (pn) {
+      panRef.current = null
+      setPanning(false)
+      // A click that never crossed the drag threshold is still a click: it clears the selection.
+      if (!pn.moved) {
+        setSelected(null)
+        setZoom(null)
+        setRenaming(false)
+      }
+      return
+    }
     const l = linkRef.current
     if (l) {
       setLink(null)
@@ -1812,6 +2318,7 @@ function CanvasPane() {
     }
     setDrag(null)
     setSelected(d.id)
+    setZoom(d.id)
     setRenaming(false)
   }
 
@@ -1843,11 +2350,79 @@ function CanvasPane() {
   }
   const answer = async (box, option) => {
     if (past || box.answer === option) return
-    if (await send([{ op: 'answer', id: box.id, answer: option }])) continueTurn(session.ids, box, option)
+    const ok = await send([{ op: 'answer', id: box.id, answer: option }])
+    if (!ok) return
+    continueTurn(session.ids, box, option)
+    // The camera must not keep looking at the box just answered: `zoom` on it made the target a
+    // close-up of the finished question, so answering appeared to zoom the same question in again.
+    lookPastAnswered(box.id)
+  }
+
+  // After an answer: a close-up of the next question still open, or the whole plan when that was
+  // the last one. It has to be a real move — *revealing* the next box does nothing when it is
+  // already on screen at fit scale, which is exactly why answering looked like it did nothing.
+  const lookPastAnswered = answeredId => {
+    const boxes0 = (docRef.current && docRef.current.boxes) || boxes
+    const next = nextQuestion(boxes0, answeredId)
+    setRenaming(false)
+    if (next) {
+      // The same path as clicking a box: `zoom` drives the camera target, so this eases in.
+      setSelected(next.id)
+      setZoom(next.id)
+      return
+    }
+    setZoom(null)
+    setSelected(null)
+    setUserView(nextView(null, content, 'fit', viewport))
+  }
+  const selectBox = box => {
+    if (past) return
+    setSelected(box.id)
+    setZoom(box.id)
+    setRenaming(false)
   }
 
   const onKeyDown = e => {
     if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return
+    if (!past) {
+      // The camera on the keyboard: arrows pan, +/- zoom the centre, 0 fits the plan.
+      const step = e.shiftKey ? 240 : 80
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        panBy(step, 0)
+        return
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault()
+        panBy(-step, 0)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        panBy(0, step)
+        return
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        panBy(0, -step)
+        return
+      }
+      if (e.key === '+' || e.key === '=') {
+        e.preventDefault()
+        zoomBy(1.25)
+        return
+      }
+      if (e.key === '-' || e.key === '_') {
+        e.preventDefault()
+        zoomBy(1 / 1.25)
+        return
+      }
+      if (e.key === '0') {
+        e.preventDefault()
+        fitNow()
+        return
+      }
+    }
     if (linking && e.key === 'Escape') {
       setLink(null)
       setLinking(false)
@@ -1862,6 +2437,7 @@ function CanvasPane() {
       if (selBox.kind !== 'drift') setRenaming(true)
     } else if (e.key === 'Escape') {
       setSelected(null)
+      setZoom(null)
     }
   }
 
@@ -1933,6 +2509,9 @@ function CanvasPane() {
   if (!mainBusy) turnRef.current = { busy: false, doc: null, since: null }
   else if (doc && (!turn.busy || turn.doc !== doc.id)) turnRef.current = { busy: true, doc: doc.id, since: doc.revision }
   const gate = gateOf(shown, past ? -1 : turnRef.current.since)
+  const questions = past
+    ? []
+    : shown.boxes.filter(b => b.kind === 'question' && !b.removed)
 
   return jsxs('div', {
     className: 'hc-root',
@@ -1974,6 +2553,53 @@ function CanvasPane() {
           }),
           jsx('button', {
             type: 'button',
+            className: `hc-btn hc-follow${showRemoved ? ' on' : ''}`,
+            'aria-pressed': showRemoved,
+            disabled: removedCount === 0,
+            title:
+              removedCount === 0
+                ? 'No boxes have been removed from this plan'
+                : `${showRemoved ? 'Hide' : 'Show'} the ${removedCount} box${removedCount === 1 ? '' : 'es'} removed from the plan, so you can restore ${removedCount === 1 ? 'it' : 'them'}`,
+            onClick: () => {
+              saveShowRemoved(!showRemoved)
+              setShowRemoved(!showRemoved)
+              setFocus(null)
+            },
+            children: `Removed ${removedCount}`
+          }),
+          jsx('button', {
+            type: 'button',
+            className: 'hc-btn hc-zoom',
+            title: 'Zoom out',
+            disabled: past,
+            onClick: () => zoomBy(1 / 1.25),
+            children: '−'
+          }),
+          jsx('span', {
+            className: 'hc-pct',
+            title: 'Zoom level: 100% is one board unit per pixel',
+            children: `${Math.round(scaleOf(cam, viewport) * 100)}%`
+          }),
+          jsx('button', {
+            type: 'button',
+            className: 'hc-btn hc-zoom',
+            title: 'Zoom in',
+            disabled: past,
+            onClick: () => zoomBy(1.25),
+            children: '+'
+          }),
+          jsx('button', {
+            type: 'button',
+            className: 'hc-btn',
+            title: 'Fit the whole plan',
+            onClick: () => {
+              setSelected(null)
+              fitNow()
+            },
+            children: 'Fit'
+          }),
+          jsx('button', {
+            type: 'button',
             className: 'hc-btn',
             disabled: busy || past,
             title: 'Add a box to the plan',
@@ -1997,8 +2623,43 @@ function CanvasPane() {
           })
         ]
       }),
+      questions.length
+        ? jsx('div', {
+            className: 'hc-asks',
+            children: questions.map(q =>
+              jsxs(
+                'div',
+                {
+                  className: `hc-ask${q.answer ? ' answered' : ''}`,
+                  children: [
+                    jsx('div', { className: 'hc-ask-q', children: q.label }),
+                    q.answer
+                      ? jsx('div', { className: 'hc-ask-answer', children: `Answer: ${q.answer}` })
+                      : jsx('div', {
+                          className: 'hc-ask-opts',
+                          children: (q.options || []).map(opt =>
+                            jsx(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'hc-btn',
+                                disabled: busy,
+                                onClick: () => answer(q, opt),
+                                children: opt
+                              },
+                              opt
+                            )
+                          )
+                        })
+                  ]
+                },
+                q.id
+              )
+            )
+          })
+        : null,
       jsxs('div', {
-        className: `hc-board${linking ? ' hc-linking' : ''}`,
+        className: `hc-board${linking ? ' hc-linking' : ''}${panning ? ' hc-panning' : ''}`,
         ref: boardRef,
         // The camera holds still under a moving pointer, so a box never moves away from a click.
         onPointerEnter: () => {
@@ -2024,9 +2685,16 @@ function CanvasPane() {
               setDrag(null)
               setLink(null)
             },
-            onPointerDown: () => {
-              setSelected(null)
-              setRenaming(false)
+            onPointerDown: e => {
+              // Empty board: start a pan. The click that ends without moving clears the selection
+              // in onPointerUp, so a drag does not also deselect what you were looking at.
+              if (past || (e.button !== 0 && e.button !== 1)) return
+              panRef.current = { x: e.clientX, y: e.clientY, view: camRefLive.current, moved: false }
+              setPanning(true)
+              if (svgRef.current) svgRef.current.setPointerCapture(e.pointerId)
+            },
+            onDoubleClick: () => {
+              if (!past) fitNow()
             },
             children: [
               jsx('defs', {
@@ -2051,6 +2719,7 @@ function CanvasPane() {
                       box,
                       pos,
                       selected: box.id === selected,
+                      zoomed: box.id === zoom,
                       popped: pops[box.id] || 0,
                       born: born[box.id] ? born[box.id][0] : undefined,
                       onPointerDown: onBoxPointerDown,
@@ -2059,6 +2728,7 @@ function CanvasPane() {
                         setSelected(b.id)
                         if (b.kind !== 'drift') setRenaming(true)
                       },
+                      onSelect: selectBox,
                       onAnswer: answer
                     },
                     box.id
@@ -2118,7 +2788,8 @@ function CanvasPane() {
             onRevert: revert,
             onUnlink: unlink,
             labels: new Map(doc.boxes.map(b => [b.id, b.label])),
-            onNote: note
+            onNote: note,
+            onAnswer: answer
           })
         : null,
       showEdits && edits.length
@@ -2330,7 +3001,7 @@ export default {
       id: 'pane',
       area: 'panes',
       title: 'Canvas',
-      data: { placement: 'right', width: '420px' },
+      data: { placement: 'right' },
       render: () => jsx(CanvasPane, {})
     })
     ctx.register({

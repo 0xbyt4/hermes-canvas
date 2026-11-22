@@ -1,0 +1,239 @@
+// Camera and layout math: the behaviour the pane depends on, pinned without a browser.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  BOX,
+  MARGIN,
+  DRIFT,
+  ZOOM,
+  TEXT,
+  charsFor,
+  questionLabel,
+  questionOptions,
+  questionRows,
+  questionTop,
+  nextQuestion,
+  boxSize,
+  layout,
+  shownBoxes,
+  bounds,
+  fitView,
+  scaleOf,
+  zoomAt,
+  panByPixels,
+  clampView,
+  visible,
+  revealBox,
+  nextView,
+} from '../../src/camera.js'
+
+const VP = { w: 500, h: 300 }
+
+const overlaps = (a, b) =>
+  a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+
+/* ---------- box sizes ---------- */
+
+test('a component box is BOX, a drift box is smaller', () => {
+  assert.deepEqual(boxSize({ kind: 'component' }), BOX)
+  assert.deepEqual(boxSize({ kind: 'drift' }), { w: 200, h: 64 })
+})
+
+test('a question box is wide enough for a sentence and grows with its answers', () => {
+  const one = boxSize({ kind: 'question', label: 'Which provider?', options: ['Stripe'] })
+  const four = boxSize({
+    kind: 'question',
+    label: 'Which provider?',
+    options: ['Stripe', 'Adyen', 'PayPal', 'Invoice'],
+  })
+  assert.equal(one.w, 320)
+  assert.ok(one.h > BOX.h)
+  assert.ok(four.h > one.h, 'more answers must make the box taller')
+})
+
+// The bug this pins: wrap widths were character counts, so a long title wrapped at 40 characters
+// still needed ~350 units inside a 320-wide box and its centred label spilled over both edges.
+test('a long question title and its answers stay inside the box', () => {
+  const box = {
+    kind: 'question',
+    label: 'Window with prod stopped (~15 min for 3 arms)',
+    options: ['take the window now', 'leave the brain up'],
+  }
+  const { w, h } = boxSize(box)
+  const lines = questionLabel(box, w)
+  assert.ok(lines.length > 1, 'this title is too long for one line and must wrap')
+  for (const line of lines) {
+    const wide = line.length * TEXT.label * TEXT.advance
+    assert.ok(wide <= w - TEXT.labelInset, `label line "${line}" needs ${wide.toFixed(0)}u of a ${w - TEXT.labelInset}u column`)
+  }
+  for (const wrapped of questionOptions(box, w)) {
+    for (const line of wrapped) {
+      const wide = line.length * TEXT.opt * TEXT.advance
+      assert.ok(wide <= w - TEXT.optInset, `answer line "${line}" needs ${wide.toFixed(0)}u of a ${w - TEXT.optInset}u row`)
+    }
+  }
+  const used = questionTop(lines) + questionRows(box, w).reduce((sum, r) => sum + r + TEXT.optGap, 0) + 6
+  assert.ok(used <= h + 0.001, `the answer rows end at ${used.toFixed(0)}u but the box is only ${h.toFixed(0)}u tall`)
+})
+
+test('a wrapped answer gets a taller row, and the box grows to hold it', () => {
+  const short = boxSize({ kind: 'question', label: 'Pick one', options: ['A'] })
+  const long = boxSize({ kind: 'question', label: 'Pick one', options: ['x'.repeat(120)] })
+  assert.ok(long.h > short.h, 'two lines of answer need more room than one')
+  const [row] = questionRows({ kind: 'question', label: '', options: ['x'.repeat(120)] })
+  assert.ok(row > TEXT.optRowMin, 'a wrapped answer must get a taller row than a single line')
+})
+
+test('the wrap width follows the box width, not a fixed character count', () => {
+  assert.ok(charsFor(320, TEXT.label, TEXT.labelInset) < charsFor(420, TEXT.label, TEXT.labelInset))
+  assert.ok(charsFor(320, TEXT.label, TEXT.labelInset) < 40, 'the old flat 40 was wider than the box')
+})
+
+/* ---------- layout ---------- */
+
+test('boxes in the same column stack without touching', () => {
+  const placed = layout([
+    { id: 'a' },
+    { id: 'b', after: ['a'] },
+    { id: 'c', after: ['a'] },
+  ])
+  assert.ok(!overlaps(placed.get('b'), placed.get('c')))
+})
+
+test('a question box never overlaps the column beside it', () => {
+  const placed = layout([
+    { id: 'q', kind: 'question', label: 'Which payment provider should checkout use?', options: ['Stripe', 'Adyen', 'Invoice'] },
+    { id: 'api', after: ['q'] },
+  ])
+  assert.ok(!overlaps(placed.get('q'), placed.get('api')))
+})
+
+/* ---------- the drift grid (bug: one endless row) ---------- */
+
+const driftBoxes = n => Array.from({ length: n }, (_, i) => ({ id: `d${i}`, kind: 'drift' }))
+
+test('unplanned writes wrap into rows instead of widening the board', () => {
+  const wide = bounds(layout([{ id: 'a' }, ...driftBoxes(8)]))
+  const wider = bounds(layout([{ id: 'a' }, ...driftBoxes(12)]))
+  assert.equal(wide.w, wider.w, 'past one row of drift boxes the board must stop widening')
+
+  const cap = DRIFT.perRow * (boxSize({ kind: 'drift' }).w + DRIFT.gapX)
+  assert.ok(wide.w <= cap + MARGIN * 2 + BOX.w, `board width ${wide.w} must stay within the grid cap`)
+})
+
+test('drift boxes past the first row move down, not out', () => {
+  const placed = layout([{ id: 'a' }, ...driftBoxes(5)])
+  const first = placed.get('d0')
+  const fifth = placed.get('d4')
+  assert.ok(fifth.y > first.y, 'the fifth drift box starts a new row')
+  assert.equal(fifth.x, first.x, 'and sits under the first one')
+})
+
+/* ---------- the camera policy (bug: refit on every added box) ---------- */
+
+test('content growth never moves the camera', () => {
+  const prev = { x: 10, y: 20, w: 800, h: 480 }
+  const huge = { x: 0, y: 0, w: 9000, h: 900 }
+  assert.equal(nextView(prev, huge, 'content', VP), prev)
+})
+
+test('opening a canvas or pressing Fit fits the whole plan', () => {
+  const content = { x: 0, y: 0, w: 400, h: 300 }
+  const v = nextView({ x: 99, y: 99, w: 50, h: 30 }, content, 'fit', VP)
+  const expected = fitView(content, VP)
+  assert.deepEqual([v.w, v.h], [expected.w, expected.h])
+  assert.equal(scaleOf(v, VP) > 0, true)
+})
+
+test('a new question is revealed without changing the zoom', () => {
+  const content = { x: 0, y: 0, w: 4000, h: 600 }
+  const prev = { x: 0, y: 0, w: 1000, h: 600 }
+  const box = { x: 3500, y: 100, w: 320, h: 180 }
+  const v = nextView(prev, content, 'question', VP, { box })
+  assert.equal(v.w, prev.w, 'zoom must stay where the user left it')
+  assert.equal(v.h, prev.h)
+  assert.ok(visible(v, box), 'the question ends up on screen')
+})
+
+test('a question already on screen does not move the camera', () => {
+  const content = { x: 0, y: 0, w: 4000, h: 600 }
+  const prev = { x: 0, y: 0, w: 1000, h: 600 }
+  assert.equal(nextView(prev, content, 'question', VP, { box: { x: 40, y: 40, w: 320, h: 180 } }), prev)
+})
+
+/* ---------- zoom and pan ---------- */
+
+test('zoom keeps the board point under the pointer still', () => {
+  const view = { x: 0, y: 0, w: 1000, h: 600 }
+  const [px, py] = [200, 100]
+  const v = zoomAt(view, 2, px, py, VP)
+  assert.equal(v.w, 500)
+  assert.equal(px, v.x + (px - view.x) * (v.w / view.w))
+  assert.equal(py, v.y + (py - view.y) * (v.h / view.h))
+})
+
+test('zoom stops at the limits', () => {
+  const view = { x: 0, y: 0, w: 1000, h: 600 }
+  const tight = zoomAt(view, 1000, 0, 0, VP)
+  assert.equal(tight.w, VP.w / ZOOM.max)
+  const loose = zoomAt(view, 0.0001, 0, 0, VP)
+  assert.equal(loose.w, VP.w / ZOOM.min)
+})
+
+test('panning moves by screen pixels and never changes the zoom', () => {
+  const view = { x: 0, y: 0, w: 1000, h: 600 }
+  const v = panByPixels(view, 50, 25, VP)
+  assert.equal(scaleOf(view, VP), 0.5)
+  assert.equal(v.x, -100)
+  assert.equal(v.y, -50)
+  assert.equal(v.w, view.w)
+})
+
+test('the view cannot be dragged off the plan', () => {
+  const content = { x: 0, y: 0, w: 400, h: 300 }
+  const v = clampView({ x: -1000, y: -1000, w: 200, h: 120 }, content)
+  assert.equal(v.x, -MARGIN)
+  assert.equal(v.y, -MARGIN)
+  const far = clampView({ x: 9000, y: 9000, w: 200, h: 120 }, content)
+  assert.equal(far.x, content.w + MARGIN - far.w)
+})
+
+test('reveal slides the least it can and keeps its size', () => {
+  const content = { x: 0, y: 0, w: 4000, h: 600 }
+  const view = { x: 0, y: 0, w: 1000, h: 600 }
+  const box = { x: 1200, y: 40, w: 320, h: 180 }
+  const v = revealBox(view, box, content)
+  assert.equal(v.w, view.w)
+  assert.ok(visible(v, box))
+  assert.ok(v.x > view.x, 'it moved right, toward the box')
+})
+
+// A removed box is kept in the document so it can be restored, but it must not hold a slot: each
+// deletion used to widen the plan, so Fit zoomed the live work smaller with every removal.
+test('removed boxes are hidden unless asked for', () => {
+  const live = [{ id: 'a', kind: 'component' }, { id: 'b', kind: 'component', after: ['a'] }]
+  const gone = { id: 'x', kind: 'question', removed: true, options: ['yes', 'no'], answer: 'yes' }
+  assert.deepEqual(shownBoxes([...live, gone]).map(b => b.id), ['a', 'b'], 'hidden by default')
+  assert.deepEqual(shownBoxes([...live, gone], true).map(b => b.id), ['a', 'b', 'x'], 'shown on request')
+})
+
+test('deleting a box shrinks the plan instead of growing the frame', () => {
+  const live = [
+    { id: 'a', kind: 'component' },
+    { id: 'b', kind: 'component', after: ['a'] },
+    { id: 'c', kind: 'component', after: ['b'] }
+  ]
+  const before = bounds(layout(shownBoxes(live)))
+  // The same plan with two boxes removed: together they would add columns if they kept slots.
+  const after = bounds(layout(shownBoxes([
+    ...live,
+    { id: 'q1', kind: 'question', removed: true, options: ['one', 'two'], answer: 'one' },
+    { id: 'q2', kind: 'question', removed: true, options: ['one', 'two'], answer: 'two' }
+  ])))
+  assert.deepEqual(after, before, 'the fitted plan ignores removed boxes entirely')
+  const withThem = bounds(layout(shownBoxes(live.concat([
+    { id: 'q1', kind: 'question', removed: true, options: ['one', 'two'], answer: 'one' },
+    { id: 'q2', kind: 'question', removed: true, options: ['one', 'two'], answer: 'two' }
+  ]), true)))
+  assert.ok(withThem.w > before.w || withThem.h > before.h, 'showing them is what makes the frame grow')
+})
