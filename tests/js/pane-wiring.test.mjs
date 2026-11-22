@@ -52,3 +52,23 @@ test('the pane never refits the view because content changed', () => {
   assert.doesNotMatch(pane, /function\s+stickyView\s*\(/, 'the monotonic view merge must be gone')
   assert.match(pane, /nextView\(/, 'the view must come from the camera policy')
 })
+
+// Easing is for moves the user asks for once (Fit, a selected box, Follow). A gesture must land
+// under the pointer immediately: easing every wheel tick made zoom and pan feel a step behind.
+test('gestures are applied at once, not eased', () => {
+  assert.match(
+    pane,
+    /const \{ cam, jump \} = useCamera\(target\)/,
+    'useCamera must expose jump() so a gesture can bypass the easing'
+  )
+  for (const [name, needle] of [
+    ['the zoom buttons', /zoomAt\(v, factor, v\.x \+ v\.w \/ 2, v\.y \+ v\.h \/ 2, vp\), liveContent\.current\), true\)/],
+    ['the arrow keys', /panByPixels\(camRefLive\.current, dx, dy, liveViewport\.current\), liveContent\.current\), true\)/],
+    ['the drag pan', /nudgeCamera\(clampView\(panByPixels\(pn\.view, dx, dy/],
+    ['the wheel', /nudgeCamera\(clampView\(zoomAt\(v, factor, bx, by, vp\)/],
+  ]) {
+    assert.match(pane, needle, `${name} must move the camera immediately`)
+  }
+  const wheel = pane.slice(pane.indexOf('const onWheel'), pane.indexOf("el.addEventListener('wheel'"))
+  assert.doesNotMatch(wheel, /takeCameraRef\.current\(/, 'the wheel must not glide over CAMERA_MS')
+})

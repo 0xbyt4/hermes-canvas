@@ -426,10 +426,18 @@ function sameView(a, b) {
 const reducedMotion = () =>
   typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
-// Eases the shown view toward `target`. Returns the view to draw.
+// Eases the shown view toward `target`, and can be told to jump: `jump` cancels the easing and
+// shows a view at once, which is what a gesture needs. Returns the view to draw and the jump.
 function useCamera(target) {
   const [cam, setCam] = useState(target)
   const camRef = useRef(target)
+  const animRef = useRef(0)
+  const jump = useCallback(next => {
+    cancelAnimationFrame(animRef.current)
+    animRef.current = 0
+    camRef.current = next
+    setCam(next)
+  }, [])
   useEffect(() => {
     const from = camRef.current
     if (sameView(from, target)) return
@@ -438,19 +446,21 @@ function useCamera(target) {
       setCam(target)
       return
     }
-    let raf = 0
     const start = performance.now()
     const tick = now => {
       const t = Math.min(1, (now - start) / CAMERA_MS)
       const v = mixView(from, target, easeInOut(t))
       camRef.current = v
       setCam(v)
-      if (t < 1) raf = requestAnimationFrame(tick)
+      if (t < 1) animRef.current = requestAnimationFrame(tick)
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    animRef.current = requestAnimationFrame(tick)
+    return () => {
+      cancelAnimationFrame(animRef.current)
+      animRef.current = 0
+    }
   }, [target.x, target.y, target.w, target.h])
-  return cam
+  return { cam, jump }
 }
 
 // Zoom onto one box at roughly panel size, keeping the panel's aspect. Used by select-to-zoom.
@@ -558,6 +568,11 @@ const STYLE = `
 .hc-live.off { background: var(--hc-muted); }
 .hc-board { position: relative; flex: 1; min-height: 160px; overflow: hidden; cursor: grab; }
 .hc-board.hc-panning { cursor: grabbing; }
+/* While a gesture is running the decorative animations stand still: they repaint every frame on top
+   of the pan/zoom the hand is waiting for. */
+.hc-board.hc-panning .hc-ring,
+.hc-board.hc-panning .hc-hatch,
+.hc-board.hc-panning .hc-comet { animation-play-state: paused; }
 .hc-board.hc-linking { cursor: crosshair; }
 /* The camera the user owns: a zoom readout between the two buttons, and steppers that never
    grow the toolbar into the board. */
@@ -1833,12 +1848,18 @@ function CanvasPane() {
   liveViewport.current = viewport
   // Moving the camera by hand means the user is looking somewhere specific: Follow must not drag
   // them back, so any manual move turns it off and says so on the button.
-  const takeCamera = next => {
+  //
+  // `immediate` is for gestures. A wheel tick or a drag has to land under the pointer NOW; gliding
+  // there over CAMERA_MS made every gesture feel rubbery and a step behind the hand. The easing is
+  // for moves the user asked for once — Fit, a selected box, Follow — not for continuous input.
+  const jumpRef = useRef(() => {})
+  const takeCamera = (next, immediate = false) => {
     setZoom(null)
     if (follow) {
       saveFollow(false)
       setFollow(false)
     }
+    if (immediate) jumpRef.current(next)
     setUserView(next)
   }
   const fitNow = () => {
@@ -1997,7 +2018,8 @@ function CanvasPane() {
     : follow && !hover && focus
       ? followView(base, placed.get(focus), viewport, content) || base
       : base
-  const cam = useCamera(target)
+  const { cam, jump } = useCamera(target)
+  jumpRef.current = jump
   const camRefLive = useRef(cam)
   camRefLive.current = cam
   // The view everything else reads: the animated camera, not its target.
@@ -2013,11 +2035,30 @@ function CanvasPane() {
   const zoomBy = factor => {
     const v = camRefLive.current
     const vp = liveViewport.current
-    takeCamera(clampView(zoomAt(v, factor, v.x + v.w / 2, v.y + v.h / 2, vp), liveContent.current))
+    takeCamera(clampView(zoomAt(v, factor, v.x + v.w / 2, v.y + v.h / 2, vp), liveContent.current), true)
   }
   const panBy = (dx, dy) => {
-    takeCamera(clampView(panByPixels(camRefLive.current, dx, dy, liveViewport.current), liveContent.current))
+    takeCamera(clampView(panByPixels(camRefLive.current, dx, dy, liveViewport.current), liveContent.current), true)
   }
+
+  // A trackpad emits wheel and pointermove events faster than the pane can render, so a gesture is
+  // coalesced to one camera update per frame: the last position of the frame wins, and no time is
+  // spent drawing positions the finger has already left.
+  const pendingCam = useRef(null)
+  const frameRef = useRef(0)
+  const nudgeCamera = next => {
+    pendingCam.current = next
+    if (frameRef.current) return
+    frameRef.current = requestAnimationFrame(() => {
+      frameRef.current = 0
+      const v = pendingCam.current
+      pendingCam.current = null
+      if (v) takeCameraRef.current(v, true)
+    })
+  }
+  useEffect(() => () => {
+    if (frameRef.current) cancelAnimationFrame(frameRef.current)
+  }, [])
 
   // Wheel and trackpad zoom at the pointer (pinch arrives as ctrl+wheel). React's onWheel is
   // passive, so preventDefault needs a native listener or the pane scrolls while zooming.
@@ -2034,7 +2075,7 @@ function CanvasPane() {
       const bx = v.x + (e.clientX - rect.left) / Math.max(0.0001, scale)
       const by = v.y + (e.clientY - rect.top) / Math.max(0.0001, scale)
       const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.012 : 0.002))
-      takeCameraRef.current(clampView(zoomAt(v, factor, bx, by, vp), liveContent.current))
+      nudgeCamera(clampView(zoomAt(v, factor, bx, by, vp), liveContent.current))
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
@@ -2109,7 +2150,7 @@ function CanvasPane() {
       if (!pn.moved && Math.hypot(dx, dy) < 4) return
       pn.moved = true
       // A pan is the user taking the wheel: Follow gets out of the way for good.
-      takeCameraRef.current(clampView(panByPixels(pn.view, dx, dy, liveViewport.current), liveContent.current))
+      nudgeCamera(clampView(panByPixels(pn.view, dx, dy, liveViewport.current), liveContent.current))
       return
     }
     const l = linkRef.current
