@@ -2305,29 +2305,28 @@ function CanvasPane() {
   const answer = async (box, option) => {
     if (past || box.answer === option) return
     const ok = await send([{ op: 'answer', id: box.id, answer: option }])
-    if (ok) continueTurn(session.ids, box, option)
+    if (!ok) return
+    continueTurn(session.ids, box, option)
     // The camera must not keep looking at the box just answered: `zoom` on it made the target a
     // close-up of the finished question, so answering appeared to zoom the same question in again.
     lookPastAnswered(box.id)
   }
 
-  // After an answer: reveal the next open question at the scale already in use, or fit the plan
-  // when that was the last one. If the user was inspecting some other box, leave them there —
-  // moving the camera away from work in progress is worse than not moving at all.
+  // After an answer: a close-up of the next question still open, or the whole plan when that was
+  // the last one. It has to be a real move — *revealing* the next box does nothing when it is
+  // already on screen at fit scale, which is exactly why answering looked like it did nothing.
   const lookPastAnswered = answeredId => {
-    const looking = zoom === answeredId || (!zoom && selected === answeredId)
     const boxes0 = (docRef.current && docRef.current.boxes) || boxes
-    setZoom(null)
-    if (!looking) return
     const next = nextQuestion(boxes0, answeredId)
-    setSelected(next ? next.id : null)
+    setRenaming(false)
     if (next) {
-      const p = placed.get(next.id)
-      if (p) {
-        setUserView(v => revealBox(v || base, p, content))
-        return
-      }
+      // The same path as clicking a box: `zoom` drives the camera target, so this eases in.
+      setSelected(next.id)
+      setZoom(next.id)
+      return
     }
+    setZoom(null)
+    setSelected(null)
     setUserView(nextView(null, content, 'fit', viewport))
   }
   const selectBox = box => {

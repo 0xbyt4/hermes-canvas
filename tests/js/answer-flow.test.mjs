@@ -42,10 +42,14 @@ test('answering the last question shows the whole plan, not a close-up', () => {
   assert.ok(plan.w >= content.w, 'the fitted view is the plan, never a close-up of one box')
 })
 
-test('the pane moves the camera on after an answer', () => {
-  // Wiring: answer() must not leave `zoom` pointing at the box it just answered.
+test('the pane zooms to the next question after an answer', () => {
+  // Wiring: answer() must not leave `zoom` pointing at the box it just answered, and it must make a
+  // visible move. Revealing the next box is not enough — at fit scale it is usually already on
+  // screen, so the camera would not appear to move at all.
   assert.match(pane, /const lookPastAnswered = answeredId =>/, 'the pane needs a post-answer camera move')
   assert.match(pane, /const answer = async \(box, option\) => \{[\s\S]*?lookPastAnswered\(box\.id\)/, 'answer() must call it')
-  assert.match(pane, /lookPastAnswered[\s\S]*?setZoom\(null\)/, 'the close-up on the answered box must be dropped')
-  assert.match(pane, /const next = nextQuestion\(/, 'it must ask the camera module which question is next')
+  const move = pane.slice(pane.indexOf('const lookPastAnswered'), pane.indexOf('const selectBox = box'))
+  assert.match(move, /setZoom\(next\.id\)/, 'the next question must be zoomed to, not merely revealed')
+  assert.match(move, /nextView\(null, content, 'fit', viewport\)/, 'the last answer fits the whole plan')
+  assert.match(move, /const next = nextQuestion\(/, 'it must ask the camera module which question is next')
 })
