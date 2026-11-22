@@ -6,6 +6,12 @@ import {
   MARGIN,
   DRIFT,
   ZOOM,
+  TEXT,
+  charsFor,
+  questionLabel,
+  questionOptions,
+  questionRows,
+  questionTop,
   boxSize,
   layout,
   bounds,
@@ -41,6 +47,44 @@ test('a question box is wide enough for a sentence and grows with its answers', 
   assert.equal(one.w, 320)
   assert.ok(one.h > BOX.h)
   assert.ok(four.h > one.h, 'more answers must make the box taller')
+})
+
+// The bug this pins: wrap widths were character counts, so a long title wrapped at 40 characters
+// still needed ~350 units inside a 320-wide box and its centred label spilled over both edges.
+test('a long question title and its answers stay inside the box', () => {
+  const box = {
+    kind: 'question',
+    label: 'Window with prod stopped (~15 min for 3 arms)',
+    options: ['take the window now', 'leave the brain up'],
+  }
+  const { w, h } = boxSize(box)
+  const lines = questionLabel(box, w)
+  assert.ok(lines.length > 1, 'this title is too long for one line and must wrap')
+  for (const line of lines) {
+    const wide = line.length * TEXT.label * TEXT.advance
+    assert.ok(wide <= w - TEXT.labelInset, `label line "${line}" needs ${wide.toFixed(0)}u of a ${w - TEXT.labelInset}u column`)
+  }
+  for (const wrapped of questionOptions(box, w)) {
+    for (const line of wrapped) {
+      const wide = line.length * TEXT.opt * TEXT.advance
+      assert.ok(wide <= w - TEXT.optInset, `answer line "${line}" needs ${wide.toFixed(0)}u of a ${w - TEXT.optInset}u row`)
+    }
+  }
+  const used = questionTop(lines) + questionRows(box, w).reduce((sum, r) => sum + r + TEXT.optGap, 0) + 6
+  assert.ok(used <= h + 0.001, `the answer rows end at ${used.toFixed(0)}u but the box is only ${h.toFixed(0)}u tall`)
+})
+
+test('a wrapped answer gets a taller row, and the box grows to hold it', () => {
+  const short = boxSize({ kind: 'question', label: 'Pick one', options: ['A'] })
+  const long = boxSize({ kind: 'question', label: 'Pick one', options: ['x'.repeat(120)] })
+  assert.ok(long.h > short.h, 'two lines of answer need more room than one')
+  const [row] = questionRows({ kind: 'question', label: '', options: ['x'.repeat(120)] })
+  assert.ok(row > TEXT.optRowMin, 'a wrapped answer must get a taller row than a single line')
+})
+
+test('the wrap width follows the box width, not a fixed character count', () => {
+  assert.ok(charsFor(320, TEXT.label, TEXT.labelInset) < charsFor(420, TEXT.label, TEXT.labelInset))
+  assert.ok(charsFor(320, TEXT.label, TEXT.labelInset) < 40, 'the old flat 40 was wider than the box')
 })
 
 /* ---------- layout ---------- */

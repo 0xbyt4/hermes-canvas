@@ -16,11 +16,63 @@ export const DRIFT = { perRow: 4, gapX: 24, gapY: 20 }
 // Zoom limits as screen pixels per board unit.
 export const ZOOM = { min: 0.2, max: 3 }
 
+// Text metrics. Labels and answers are SVG text, which cannot be measured before it is laid out, so
+// a wrap width is computed from the box width and a conservative glyph advance (advance is a
+// fraction of the font size). Wrapping by character count alone is what pushed a question's title
+// out of its own box: 40 characters at font-size 17 need ~350 units inside a 320-wide box, and a
+// centred label then spilled over both edges.
+export const TEXT = {
+  label: 17,
+  opt: 14,
+  advance: 0.55,
+  labelInset: 26,
+  optInset: 18,
+  optLine: 13.5,
+  optRowMin: 30,
+  optGap: 6,
+}
+export const QUESTION_W = 320
+
+/** How many characters of `px` type fit across `width`, less `inset` of padding. */
+export const charsFor = (width, px, inset) =>
+  Math.max(8, Math.floor((width - inset) / (px * TEXT.advance)))
+
+/** The question's own sentence, wrapped to its box. */
+export function questionLabel(box, w = QUESTION_W) {
+  return wrapText(box.label, charsFor(w, TEXT.label, TEXT.labelInset), 3)
+}
+
+/** Each answer, wrapped to the row it sits in. */
+export function questionOptions(box, w = QUESTION_W) {
+  return (box.options || []).map(opt => wrapText(opt, charsFor(w, TEXT.opt, TEXT.optInset), 2))
+}
+
+/** One row per answer, taller when that answer wraps. */
+export function questionRows(box, w = QUESTION_W) {
+  return questionOptions(box, w).map(lines => Math.max(TEXT.optRowMin, 6 + lines.length * TEXT.optLine))
+}
+
+/** Where the first answer row starts, below the wrapped question. */
+export function questionTop(labelLines) {
+  return 26 + (labelLines.length - 1) * TEXT.label * 1.15 + 20
+}
+
 export function wrapText(text, max, lines = 2) {
   const out = []
   let cur = ''
-  for (const w of String(text || '').split(/\s+/)) {
+  for (const raw of String(text || '').split(/\s+/)) {
+    let w = raw
     if (!w) continue
+    // A single token longer than the line — a file path, a URL, a long flag — is hard-broken.
+    // Leaving it whole made it overflow the box no matter what width the wrapper was given.
+    while (w.length > max) {
+      if (cur) {
+        out.push(cur)
+        cur = ''
+      }
+      out.push(w.slice(0, max))
+      w = w.slice(max)
+    }
     if ((cur + ' ' + w).trim().length > max && cur) {
       out.push(cur)
       cur = w
@@ -39,12 +91,14 @@ export function wrapText(text, max, lines = 2) {
 
 export function boxSize(box) {
   if (box.kind === 'question') {
-    // A question carries a full sentence plus up to four answers, so it is much wider and
-    // taller than a component box. Sizing it as a component let the option text run out of
-    // its chip and across the neighbouring one.
-    const lines = wrapText(box.label, 40, 3).length || 1
-    const rows = Math.max(1, (box.options || []).length)
-    return { w: 320, h: 26 + lines * 20 + 20 + rows * 36 + 6 }
+    // A question carries a full sentence plus up to four answers, so it is much wider and taller
+    // than a component box. The height comes from the same wrapping the renderer uses, so a
+    // wrapped answer can neither clip nor overlap the row below it.
+    const w = QUESTION_W
+    const label = questionLabel(box, w)
+    const rows = questionRows(box, w)
+    const h = questionTop(label) + rows.reduce((sum, r) => sum + r + TEXT.optGap, 0) + 6
+    return { w, h }
   }
   if (box.kind === 'drift') return { w: 200, h: 64 }
   return { ...BOX }

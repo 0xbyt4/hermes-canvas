@@ -34,11 +34,63 @@ const DRIFT = { perRow: 4, gapX: 24, gapY: 20 }
 // Zoom limits as screen pixels per board unit.
 const ZOOM = { min: 0.2, max: 3 }
 
+// Text metrics. Labels and answers are SVG text, which cannot be measured before it is laid out, so
+// a wrap width is computed from the box width and a conservative glyph advance (advance is a
+// fraction of the font size). Wrapping by character count alone is what pushed a question's title
+// out of its own box: 40 characters at font-size 17 need ~350 units inside a 320-wide box, and a
+// centred label then spilled over both edges.
+const TEXT = {
+  label: 17,
+  opt: 14,
+  advance: 0.55,
+  labelInset: 26,
+  optInset: 18,
+  optLine: 13.5,
+  optRowMin: 30,
+  optGap: 6,
+}
+const QUESTION_W = 320
+
+/** How many characters of `px` type fit across `width`, less `inset` of padding. */
+const charsFor = (width, px, inset) =>
+  Math.max(8, Math.floor((width - inset) / (px * TEXT.advance)))
+
+/** The question's own sentence, wrapped to its box. */
+function questionLabel(box, w = QUESTION_W) {
+  return wrapText(box.label, charsFor(w, TEXT.label, TEXT.labelInset), 3)
+}
+
+/** Each answer, wrapped to the row it sits in. */
+function questionOptions(box, w = QUESTION_W) {
+  return (box.options || []).map(opt => wrapText(opt, charsFor(w, TEXT.opt, TEXT.optInset), 2))
+}
+
+/** One row per answer, taller when that answer wraps. */
+function questionRows(box, w = QUESTION_W) {
+  return questionOptions(box, w).map(lines => Math.max(TEXT.optRowMin, 6 + lines.length * TEXT.optLine))
+}
+
+/** Where the first answer row starts, below the wrapped question. */
+function questionTop(labelLines) {
+  return 26 + (labelLines.length - 1) * TEXT.label * 1.15 + 20
+}
+
 function wrapText(text, max, lines = 2) {
   const out = []
   let cur = ''
-  for (const w of String(text || '').split(/\s+/)) {
+  for (const raw of String(text || '').split(/\s+/)) {
+    let w = raw
     if (!w) continue
+    // A single token longer than the line — a file path, a URL, a long flag — is hard-broken.
+    // Leaving it whole made it overflow the box no matter what width the wrapper was given.
+    while (w.length > max) {
+      if (cur) {
+        out.push(cur)
+        cur = ''
+      }
+      out.push(w.slice(0, max))
+      w = w.slice(max)
+    }
     if ((cur + ' ' + w).trim().length > max && cur) {
       out.push(cur)
       cur = w
@@ -57,12 +109,14 @@ function wrapText(text, max, lines = 2) {
 
 function boxSize(box) {
   if (box.kind === 'question') {
-    // A question carries a full sentence plus up to four answers, so it is much wider and
-    // taller than a component box. Sizing it as a component let the option text run out of
-    // its chip and across the neighbouring one.
-    const lines = wrapText(box.label, 40, 3).length || 1
-    const rows = Math.max(1, (box.options || []).length)
-    return { w: 320, h: 26 + lines * 20 + 20 + rows * 36 + 6 }
+    // A question carries a full sentence plus up to four answers, so it is much wider and taller
+    // than a component box. The height comes from the same wrapping the renderer uses, so a
+    // wrapped answer can neither clip nor overlap the row below it.
+    const w = QUESTION_W
+    const label = questionLabel(box, w)
+    const rows = questionRows(box, w)
+    const h = questionTop(label) + rows.reduce((sum, r) => sum + r + TEXT.optGap, 0) + 6
+    return { w, h }
   }
   if (box.kind === 'drift') return { w: 200, h: 64 }
   return { ...BOX }
@@ -813,14 +867,14 @@ function Badge({ box, w }) {
   return null
 }
 
-function BoxLabel({ box, w, top, size, max }) {
-  const lines = wrapText(box.label, max)
+function BoxLabel({ box, w, top, size, max, lines }) {
+  const text = lines || wrapText(box.label, max)
   return jsx('text', {
     x: w / 2,
     y: top,
     textAnchor: 'middle',
     fontSize: size,
-    children: lines.map((line, i) => jsx('tspan', { x: w / 2, dy: i ? size * 1.15 : 0, children: line }, i))
+    children: text.map((line, i) => jsx('tspan', { x: w / 2, dy: i ? size * 1.15 : 0, children: line }, i))
   })
 }
 
@@ -871,24 +925,26 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
     jsx('path', { className: 'hc-ink', d: srect(hash(box.id), 0, 0, w, h), pathLength: drawing ? 1 : undefined }, 'ink')
   ]
   if (box.kind === 'question') {
-    const labelMax = 40
-    const lines = wrapText(box.label, labelMax, 3)
-    children.push(jsx(BoxLabel, { box, w, top: 26, size: 17, max: labelMax }, 'label'))
+    // Wrap widths come from the box width (src/camera.js), never a bare character count: the title
+    // is centred, so a line wider than the box spills over BOTH edges.
+    const lines = questionLabel(box, w)
+    const opts = questionOptions(box, w)
+    const rows = questionRows(box, w)
+    children.push(jsx(BoxLabel, { box, w, top: 26, size: TEXT.label, lines }, 'label'))
     // Answers stack: three or four long answers side by side cannot be read at any width.
     const pad = 12
-    const rowH = 30
-    const rowGap = 6
-    const top = 26 + (lines.length - 1) * 17 * 1.15 + 20
+    let top = questionTop(lines)
     ;(box.options || []).forEach((opt, i) => {
       const chosen = box.answer === opt
       const dim = !!box.answer && !chosen
-      const optLines = wrapText(opt, 46, 2)
+      const rowH = rows[i] || TEXT.optRowMin
+      const optLines = opts[i] || [opt]
       children.push(
         jsxs(
           'g',
           {
             className: `hc-opt${chosen ? ' chosen' : ''}${dim ? ' dim' : ''}`,
-            transform: `translate(${pad} ${top + i * (rowH + rowGap)})`,
+            transform: `translate(${pad} ${top})`,
             onPointerDown: e => e.stopPropagation(),
             onClick: e => {
               e.stopPropagation()
@@ -904,13 +960,14 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
                 x: 8,
                 y: optLines.length > 1 ? 12 : 19,
                 textAnchor: 'start',
-                children: optLines.map((line, k) => jsx('tspan', { x: 8, dy: k ? 12.5 : 0, children: line }, k))
+                children: optLines.map((line, k) => jsx('tspan', { x: 8, dy: k ? TEXT.optLine : 0, children: line }, k))
               })
             ]
           },
           `opt-${i}`
         )
       )
+      top += rowH + TEXT.optGap
     })
   } else if (box.kind === 'drift') {
     children.push(
@@ -920,7 +977,7 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
       jsx('text', { x: 12, y: 44, className: 'hc-sub', children: clipStart(box.files[0] || box.label, 34) }, 'path')
     )
   } else {
-    children.push(jsx(BoxLabel, { box, w, top: 34, size: 17, max: 18 }, 'label'))
+    children.push(jsx(BoxLabel, { box, w, top: 34, size: TEXT.label, max: charsFor(w, TEXT.label, TEXT.labelInset) }, 'label'))
     children.push(
       jsx('text', { x: w / 2, y: h - 10, textAnchor: 'middle', className: 'hc-sub', children: clip(subLine(box), 28) }, 'sub')
     )
