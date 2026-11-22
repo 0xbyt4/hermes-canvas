@@ -119,6 +119,13 @@ export function boxSize(box) {
 
 /* ---------- layout ---------- */
 
+// A removed box stays in the document so it can be restored, but it must not take a slot in the
+// plan: every deletion would otherwise widen the board, and Fit would zoom the live work smaller
+// and smaller with each one. Show removed boxes only when the user asks to see them.
+export function shownBoxes(boxes, showRemoved = false) {
+  return showRemoved ? boxes : boxes.filter(b => !b.removed)
+}
+
 // Every box gets an automatic slot by dependency depth: in columns (left to right) on a wide pane,
 // in rows (top to bottom) on a tall one, so boxes stay readable. A box sits one step before the
 // first box that waits for it, so a box with no dependencies is drawn next to its user, not far

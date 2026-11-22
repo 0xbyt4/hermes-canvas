@@ -72,3 +72,16 @@ test('gestures are applied at once, not eased', () => {
   const wheel = pane.slice(pane.indexOf('const onWheel'), pane.indexOf("el.addEventListener('wheel'"))
   assert.doesNotMatch(wheel, /takeCameraRef\.current\(/, 'the wheel must not glide over CAMERA_MS')
 })
+
+test('the pane hides removed boxes by default and offers the toggle', () => {
+  // The slot must be given up before layout: filtering after it would keep the dead columns and
+  // Fit would still frame them.
+  assert.match(pane, /const liveBoxes = useMemo\(\(\) => shownBoxes\(boxes, showRemoved\)/, 'remove before layout')
+  assert.match(pane, /const placed = useMemo\(\(\) => layout\(liveBoxes, vertical\)/, 'layout runs on the live boxes only')
+  assert.match(pane, /const \[showRemoved, setShowRemoved\] = useState\(readShowRemoved\)/, 'the toggle is state')
+  assert.match(pane, /getItem\(REMOVED_KEY\) === 'on'/, 'it starts off unless the user turned it on')
+  assert.match(pane, /setItem\(REMOVED_KEY, on \? 'on' : 'off'\)/, 'the choice is remembered')
+  assert.match(pane, /children: `Removed \$\{removedCount\}`/, 'the button says how many are hidden')
+  assert.match(pane, /'aria-pressed': showRemoved/, 'it reads as a toggle')
+  assert.match(pane, /if \(sel && sel\.removed\)/, 'hiding a removed box drops the selection on it')
+})

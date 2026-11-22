@@ -137,6 +137,13 @@ function boxSize(box) {
 
 /* ---------- layout ---------- */
 
+// A removed box stays in the document so it can be restored, but it must not take a slot in the
+// plan: every deletion would otherwise widen the board, and Fit would zoom the live work smaller
+// and smaller with each one. Show removed boxes only when the user asks to see them.
+function shownBoxes(boxes, showRemoved = false) {
+  return showRemoved ? boxes : boxes.filter(b => !b.removed)
+}
+
 // Every box gets an automatic slot by dependency depth: in columns (left to right) on a wide pane,
 // in rows (top to bottom) on a tall one, so boxes stay readable. A box sits one step before the
 // first box that waits for it, so a box with no dependencies is drawn next to its user, not far
@@ -1719,6 +1726,27 @@ function saveFollow(on) {
   }
 }
 
+// Removed boxes are hidden unless the user asks to see them: a plan that keeps every deletion in
+// its columns pushes the live boxes smaller with each one.
+const REMOVED_KEY = 'hermes-canvas.showRemoved'
+
+function readShowRemoved() {
+  try {
+    return window.localStorage.getItem(REMOVED_KEY) === 'on'
+  } catch (err) {
+    console.warn('[hermes-canvas] could not read the Removed setting', err)
+    return false
+  }
+}
+
+function saveShowRemoved(on) {
+  try {
+    window.localStorage.setItem(REMOVED_KEY, on ? 'on' : 'off')
+  } catch (err) {
+    console.warn('[hermes-canvas] could not save the Removed setting', err)
+  }
+}
+
 // What changed between two revisions of the same canvas: boxes with a new status or new writes,
 // and the boxes that just became done.
 function diffBoxes(prev, boxes) {
@@ -1899,7 +1927,12 @@ function CanvasPane() {
   const shown = (hist && hist.doc) || doc
   const past = Boolean(hist)
   const boxes = shown ? shown.boxes : []
-  const placed = useMemo(() => layout(boxes, vertical), [boxes, vertical])
+  // Removed boxes are kept so they can be restored, but they take no slot unless the user asks to
+  // see them: otherwise every deletion widened the plan and Fit pushed the live boxes smaller.
+  const [showRemoved, setShowRemoved] = useState(readShowRemoved)
+  const removedCount = useMemo(() => boxes.filter(b => b.removed).length, [boxes])
+  const liveBoxes = useMemo(() => shownBoxes(boxes, showRemoved), [boxes, showRemoved])
+  const placed = useMemo(() => layout(liveBoxes, vertical), [liveBoxes, vertical])
   const content = useMemo(() => bounds(placed), [placed])
   // The camera belongs to the user. `userView` is the view they set by zooming or panning; null
   // means nobody has touched it yet, and only then does content decide (the first paint fits).
@@ -1955,6 +1988,16 @@ function CanvasPane() {
   useEffect(() => () => clearTimeout(holdRef.current), [])
   const [focus, setFocus] = useState(null) // box id
   const [zoom, setZoom] = useState(null) // box id the user selected for a close look
+  // Hiding removed boxes must not leave the panel pointing at a box the board no longer shows.
+  useEffect(() => {
+    if (showRemoved || !selected) return
+    const sel = boxes.find(b => b.id === selected)
+    if (sel && sel.removed) {
+      setSelected(null)
+      setZoom(null)
+      setRenaming(false)
+    }
+  }, [showRemoved, boxes, selected])
   const [comets, setComets] = useState([]) // { key, d }
   const [pops, setPops] = useState({}) // box id -> stamp
   const [born, setBorn] = useState({}) // box id -> [draw-on delay (s), stamp], while it draws itself
@@ -2507,6 +2550,22 @@ function CanvasPane() {
               setFocus(null)
             },
             children: 'Follow'
+          }),
+          jsx('button', {
+            type: 'button',
+            className: `hc-btn hc-follow${showRemoved ? ' on' : ''}`,
+            'aria-pressed': showRemoved,
+            disabled: removedCount === 0,
+            title:
+              removedCount === 0
+                ? 'No boxes have been removed from this plan'
+                : `${showRemoved ? 'Hide' : 'Show'} the ${removedCount} box${removedCount === 1 ? '' : 'es'} removed from the plan, so you can restore ${removedCount === 1 ? 'it' : 'them'}`,
+            onClick: () => {
+              saveShowRemoved(!showRemoved)
+              setShowRemoved(!showRemoved)
+              setFocus(null)
+            },
+            children: `Removed ${removedCount}`
           }),
           jsx('button', {
             type: 'button',

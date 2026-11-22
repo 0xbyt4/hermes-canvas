@@ -15,6 +15,7 @@ import {
   nextQuestion,
   boxSize,
   layout,
+  shownBoxes,
   bounds,
   fitView,
   scaleOf,
@@ -205,4 +206,34 @@ test('reveal slides the least it can and keeps its size', () => {
   assert.equal(v.w, view.w)
   assert.ok(visible(v, box))
   assert.ok(v.x > view.x, 'it moved right, toward the box')
+})
+
+// A removed box is kept in the document so it can be restored, but it must not hold a slot: each
+// deletion used to widen the plan, so Fit zoomed the live work smaller with every removal.
+test('removed boxes are hidden unless asked for', () => {
+  const live = [{ id: 'a', kind: 'component' }, { id: 'b', kind: 'component', after: ['a'] }]
+  const gone = { id: 'x', kind: 'question', removed: true, options: ['yes', 'no'], answer: 'yes' }
+  assert.deepEqual(shownBoxes([...live, gone]).map(b => b.id), ['a', 'b'], 'hidden by default')
+  assert.deepEqual(shownBoxes([...live, gone], true).map(b => b.id), ['a', 'b', 'x'], 'shown on request')
+})
+
+test('deleting a box shrinks the plan instead of growing the frame', () => {
+  const live = [
+    { id: 'a', kind: 'component' },
+    { id: 'b', kind: 'component', after: ['a'] },
+    { id: 'c', kind: 'component', after: ['b'] }
+  ]
+  const before = bounds(layout(shownBoxes(live)))
+  // The same plan with two boxes removed: together they would add columns if they kept slots.
+  const after = bounds(layout(shownBoxes([
+    ...live,
+    { id: 'q1', kind: 'question', removed: true, options: ['one', 'two'], answer: 'one' },
+    { id: 'q2', kind: 'question', removed: true, options: ['one', 'two'], answer: 'two' }
+  ])))
+  assert.deepEqual(after, before, 'the fitted plan ignores removed boxes entirely')
+  const withThem = bounds(layout(shownBoxes(live.concat([
+    { id: 'q1', kind: 'question', removed: true, options: ['one', 'two'], answer: 'one' },
+    { id: 'q2', kind: 'question', removed: true, options: ['one', 'two'], answer: 'two' }
+  ]), true)))
+  assert.ok(withThem.w > before.w || withThem.h > before.h, 'showing them is what makes the frame grow')
 })
