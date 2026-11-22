@@ -918,7 +918,7 @@ function subLine(box) {
 }
 
 // `born` is the draw-on delay in seconds for a box that just appeared, else undefined.
-function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick, onSelect }) {
+function BoxEl({ box, pos, selected, zoomed, popped, born, onPointerDown, onDoubleClick, onSelect, onAnswer }) {
   const { w, h } = pos
   const state = boxState(box)
   const drawing = born !== undefined
@@ -961,12 +961,15 @@ function BoxEl({ box, pos, selected, popped, born, onPointerDown, onDoubleClick,
             onPointerDown: e => e.stopPropagation(),
             onClick: e => {
               e.stopPropagation()
-              // A click on the tiny tile must never cast an answer by accident. It selects
-              // and zooms the question; the readable answer buttons live in the panel below.
-              onSelect(box)
+              // Reading distance decides what a chip click means. Zoomed in, the chip is legible and
+              // the click is the answer — that is the button the user is aiming at. At fit scale the
+              // chip is a few pixels of text, so a click there only zooms in: a stray click on a
+              // 4px chip must never cast a vote.
+              if (zoomed) onAnswer(box, opt)
+              else onSelect(box)
             },
             role: 'button',
-            'aria-label': `Select this question and answer in the panel: ${opt}`,
+            'aria-label': zoomed ? `Answer: ${opt}` : `Zoom in to answer: ${opt}`,
             children: [
               jsx('rect', { width: w - pad * 2, height: rowH, rx: 6 }),
               jsx('text', {
@@ -2657,6 +2660,7 @@ function CanvasPane() {
                       box,
                       pos,
                       selected: box.id === selected,
+                      zoomed: box.id === zoom,
                       popped: pops[box.id] || 0,
                       born: born[box.id] ? born[box.id][0] : undefined,
                       onPointerDown: onBoxPointerDown,
@@ -2665,7 +2669,8 @@ function CanvasPane() {
                         setSelected(b.id)
                         if (b.kind !== 'drift') setRenaming(true)
                       },
-                      onSelect: selectBox
+                      onSelect: selectBox,
+                      onAnswer: answer
                     },
                     box.id
                   )

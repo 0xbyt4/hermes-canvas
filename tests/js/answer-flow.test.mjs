@@ -42,6 +42,15 @@ test('answering the last question shows the whole plan, not a close-up', () => {
   assert.ok(plan.w >= content.w, 'the fitted view is the plan, never a close-up of one box')
 })
 
+test('a chip answers when you are zoomed in, and only zooms in when you are not', () => {
+  // Distance decides meaning: a legible chip click is the answer; a chip at fit scale is a few
+  // pixels of text, so it may only zoom you in. A dead click when already zoomed was the bug.
+  assert.match(pane, /if \(zoomed\) onAnswer\(box, opt\)[\s\S]{0,40}else onSelect\(box\)/, 'the chip must answer at reading distance')
+  assert.match(pane, /zoomed: box\.id === zoom/, 'the pane must tell each box whether it is the close-up')
+  assert.match(pane, /onAnswer: answer/, 'the chip needs the answer handler')
+  assert.match(pane, /'aria-label': zoomed \? `Answer: \$\{opt\}`/, 'the label must say what the click does')
+})
+
 test('the pane zooms to the next question after an answer', () => {
   // Wiring: answer() must not leave `zoom` pointing at the box it just answered, and it must make a
   // visible move. Revealing the next box is not enough — at fit scale it is usually already on
