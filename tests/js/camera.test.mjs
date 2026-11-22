@@ -17,7 +17,7 @@ import {
   visible,
   revealBox,
   nextView,
-} from '../../desktop/camera.js'
+} from '../../src/camera.js'
 
 const VP = { w: 500, h: 300 }
 

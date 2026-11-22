@@ -2,7 +2,7 @@
 // Each one is written as the symptom, so a future change that reintroduces it fails here first.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { bounds, layout, nextView, scaleOf } from '../../desktop/camera.js'
+import { bounds, layout, nextView, scaleOf } from '../../src/camera.js'
 
 const VP = { w: 420, h: 300 }
 const driftBoxes = n => Array.from({ length: n }, (_, i) => ({ id: `d${i}`, kind: 'drift' }))

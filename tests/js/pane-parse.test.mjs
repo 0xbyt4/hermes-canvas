@@ -27,7 +27,7 @@ test('desktop/plugin.js parses as an ES module', () => {
   assert.ok(ok, `plugin.js does not parse:\n${stderr}`)
 })
 
-test('desktop/camera.js parses as an ES module', () => {
-  const { ok, stderr } = parseAsModule('desktop/camera.js')
+test('src/camera.js parses as an ES module', () => {
+  const { ok, stderr } = parseAsModule('src/camera.js')
   assert.ok(ok, `camera.js does not parse:\n${stderr}`)
 })
